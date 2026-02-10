@@ -1,0 +1,44 @@
+# ============================================================
+# Discord Minutes Bot - Docker Compose (GPU)
+# ============================================================
+# Prerequisites:
+#   - Docker Engine with Compose V2
+#   - nvidia-container-toolkit installed and configured
+#   - .env file with DISCORD_BOT_TOKEN and ANTHROPIC_API_KEY
+#   - config.yaml configured with guild/channel IDs
+#   - credentials.json (Google service account key, if Drive watcher enabled)
+#   - touch processed_files.json   (create empty file before first run)
+#
+# Usage:
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose down
+# ============================================================
+
+services:
+  bot:
+    build: .
+    container_name: discord-minutes-bot
+    restart: on-failure
+
+    # Mount secrets and config (not baked into image)
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./config.yaml:/app/config.yaml:ro
+      - ./credentials.json:/app/credentials.json:ro
+      - ./processed_files.json:/app/processed_files.json
+      - ./logs:/app/logs
+      # Persist Whisper model cache across container restarts (~3 GB)
+      - whisper-cache:/app/.cache/huggingface
+
+    # GPU access via nvidia-container-toolkit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  whisper-cache:
