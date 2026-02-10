@@ -45,6 +45,7 @@ class CraigConfig:
     cook_format: str = "aac"
     cook_container: str = "zip"
     download_timeout_sec: int = 300
+    poll_timeout_sec: int = 600
     max_retries: int = 2
 
 
@@ -84,6 +85,11 @@ class PosterConfig:
 
 
 @dataclass(frozen=True)
+class PipelineConfig:
+    processing_timeout_sec: int = 3600
+
+
+@dataclass(frozen=True)
 class LoggingConfig:
     level: str = "INFO"
     file: str = "logs/bot.log"
@@ -111,6 +117,7 @@ class Config:
     poster: PosterConfig
     logging: LoggingConfig
     google_drive: GoogleDriveConfig
+    pipeline: PipelineConfig
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +134,7 @@ _SECTION_CLASSES: dict[str, type] = {
     "poster": PosterConfig,
     "logging": LoggingConfig,
     "google_drive": GoogleDriveConfig,
+    "pipeline": PipelineConfig,
 }
 
 
@@ -232,8 +240,14 @@ def _validate(cfg: Config) -> None:
     # Craig
     if cfg.craig.download_timeout_sec < 1:
         errors.append("craig.download_timeout_sec must be >= 1")
+    if cfg.craig.poll_timeout_sec < 1:
+        errors.append("craig.poll_timeout_sec must be >= 1")
     if cfg.craig.max_retries < 0:
         errors.append("craig.max_retries must be >= 0")
+
+    # Pipeline
+    if cfg.pipeline.processing_timeout_sec < 1:
+        errors.append("pipeline.processing_timeout_sec must be >= 1")
 
     # Poster
     if cfg.poster.max_embed_length < 1:

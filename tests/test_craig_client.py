@@ -86,8 +86,12 @@ def _mock_job_flow(
     zip_data: bytes | None = None,
     dl_filename: str = _DL_FILENAME,
     poll_pending_count: int = 0,
+    post_status: int = 200,
 ) -> None:
-    """Set up mocked responses for the full poll-download flow."""
+    """Set up mocked responses for the full start-poll-download flow."""
+    # POST to start the cook job
+    mocked.post(_JOB_URL, status=post_status)
+
     # Pending polls before completion
     for _ in range(poll_pending_count):
         mocked.get(_JOB_URL, payload=_job_response(status="pending", state_type="cooking"))
@@ -120,6 +124,59 @@ def test_zip_pattern_underscore_name() -> None:
 def test_zip_pattern_no_match() -> None:
     assert ZIP_FILENAME_PATTERN.match("info.txt") is None
     assert ZIP_FILENAME_PATTERN.match("README") is None
+
+
+# --- POST job start ---
+
+@pytest.mark.asyncio
+async def test_start_job_sends_post_with_format(
+    recording: DetectedRecording,
+    cfg: CraigConfig,
+    tmp_path: Path,
+) -> None:
+    """download() sends a POST to start the cook job before polling."""
+    zip_data = _make_zip({"1-alice.aac": b"audio"})
+
+    async with aiohttp.ClientSession() as session:
+        client = CraigClient(session, recording, cfg)
+
+        with aioresponses() as mocked:
+            _mock_job_flow(mocked, zip_data=zip_data)
+            await client.download(tmp_path)
+
+            # Verify POST was sent (first request in the history)
+            history = mocked.requests
+            post_calls = [
+                (key, calls)
+                for key, calls in history.items()
+                if key[0] == "POST"
+            ]
+            assert len(post_calls) == 1
+            _, calls = post_calls[0]
+            assert len(calls) == 1
+            body = calls[0].kwargs.get("json", {})
+            assert body["format"] == "aac"
+            assert body["container"] == "zip"
+
+
+@pytest.mark.asyncio
+async def test_start_job_failure_non_fatal(
+    recording: DetectedRecording,
+    cfg: CraigConfig,
+    tmp_path: Path,
+) -> None:
+    """POST failure should not block polling — job may already be running."""
+    zip_data = _make_zip({"1-alice.aac": b"audio"})
+
+    async with aiohttp.ClientSession() as session:
+        client = CraigClient(session, recording, cfg)
+
+        with aioresponses() as mocked:
+            # POST returns 500 but polling still succeeds
+            _mock_job_flow(mocked, zip_data=zip_data, post_status=500)
+            results = await client.download(tmp_path)
+
+    assert len(results) == 1
 
 
 # --- get_speakers (now raises NotImplementedError) ---
@@ -232,6 +289,7 @@ async def test_download_job_failed(
         client = CraigClient(session, recording, cfg)
 
         with aioresponses() as mocked:
+            mocked.post(_JOB_URL, status=200)
             mocked.get(_JOB_URL, payload=_job_response(status="error", state_type="error"))
 
             with pytest.raises(AudioAcquisitionError, match="Cook job failed"):
@@ -252,6 +310,7 @@ async def test_download_job_no_output_filename(
         client = CraigClient(session, recording, cfg)
 
         with aioresponses() as mocked:
+            mocked.post(_JOB_URL, status=200)
             mocked.get(_JOB_URL, payload=response)
 
             with pytest.raises(AudioAcquisitionError, match="no outputFileName"):

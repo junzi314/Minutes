@@ -288,9 +288,43 @@
 
 ---
 
+## Phase 7: Craig API POST Job Start
+
+**Date**: 2026-02-11
+**Verdict**: PASS
+
+### Deliverables
+- [x] `_start_job()` method: POST /api/v1/recordings/{rec_id}/job with format+container body
+- [x] `download()` calls `_start_job()` before `_poll_until_complete()`
+- [x] Non-fatal POST failure handling (warns but continues — job may already be running)
+- [x] Docstrings updated to reflect corrected 3-step flow (POST → GET poll → GET download)
+- [x] 2 new tests: POST body verification, POST failure non-fatal behavior
+- [x] All existing tests updated with POST mock
+
+### Files Changed
+| File | Change Type | Lines |
+|------|-------------|-------|
+| src/craig_client.py | modify | +30 (_start_job method, updated download flow, docstrings) |
+| tests/test_craig_client.py | modify | +45 (POST mocks, 2 new tests) |
+
+### Tests
+- [x] Unit tests: 112/112 PASS (was 110, +2 new)
+- [x] Zero regressions
+
+### Code Review
+- Verdict: APPROVED
+- Non-fatal POST design prevents breakage when job already running from browser or retry
+
+### Notes
+- Root cause: previous recordings worked because browser had already sent POST to start the job
+- Without POST, GET polling returns no job status and eventually times out
+- Uses existing `cook_format` ("aac") and `cook_container` ("zip") from CraigConfig
+
+---
+
 ## Summary
 
-**Phases Completed**: 6 of 6
+**Phases Completed**: 7 of 7
 **Final Status**: COMPLETED
 
 ### Phases Executed
@@ -302,6 +336,7 @@
 | Phase 4: Integration Testing + Hardening | PASS | Pipeline integration tests, retry logic, log masking, systemd, README, 7 tests |
 | Phase 5: Google Drive Monitoring | PASS | Drive watcher, pipeline refactoring, shared ZIP extraction, 17 tests |
 | Phase 6: Docker化 | PASS | GPU Dockerfile, docker-compose.yml, .dockerignore, non-root user |
+| Phase 7: Craig API POST Job Start | PASS | POST to start cook job before polling, 2 new tests |
 
 ### Files Created/Modified
 | File | Description |
@@ -312,7 +347,7 @@
 | `src/config.py` | Config loader (incl. GoogleDriveConfig + validation) |
 | `src/detector.py` | Craig recording-end detection |
 | `src/audio_source.py` | AudioSource ABC + dataclasses + shared ZIP extraction |
-| `src/craig_client.py` | Craig Cook API client with retry |
+| `src/craig_client.py` | Craig Cook API client with POST job start + retry |
 | `src/transcriber.py` | faster-whisper GPU wrapper |
 | `src/merger.py` | Chronological transcript merging |
 | `src/generator.py` | Claude API minutes generation with retry |
@@ -326,7 +361,7 @@
 | `docker-compose.yml` | Compose config with GPU, volumes, restart policy |
 | `.dockerignore` | Build context exclusion rules |
 | `tests/test_detector.py` | 16 tests |
-| `tests/test_craig_client.py` | 9 tests |
+| `tests/test_craig_client.py` | 12 tests |
 | `tests/test_config.py` | 10 tests |
 | `tests/test_transcriber.py` | 10 tests (7 unit + 3 GPU) |
 | `tests/test_merger.py` | 13 tests |
@@ -336,11 +371,10 @@
 | `tests/test_drive_watcher.py` | 17 tests |
 
 ### Test Summary
-- **Total**: 110 unit/integration tests + 3 GPU tests = 113 tests
+- **Total**: 112 unit/integration tests + 3 GPU tests = 115 tests
 - **All passing**: zero failures, zero regressions
 
 ### Next Steps
-1. `docker compose up -d --build` to build and start the container
-2. `docker compose logs -f` to verify startup and GPU detection
-3. Run manual validation with a real Craig recording (Task 4.6)
-4. Verify Whisper model downloads and persists across container restart
+1. `docker compose up -d --build` to rebuild container with POST fix
+2. Test with a real Craig recording — job should now start automatically
+3. Verify full pipeline: detect → POST start → poll → download → transcribe → post

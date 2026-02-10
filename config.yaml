@@ -24,6 +24,8 @@ craig:
   cook_container: "zip"
   # Timeout in seconds for the Cook API download request
   download_timeout_sec: 300
+  # Timeout in seconds for job API polling (waiting for cook to complete)
+  poll_timeout_sec: 600
   # Number of retry attempts on failure
   max_retries: 2
 
@@ -70,6 +72,10 @@ poster:
   include_transcript: false
   # Maximum characters per message chunk (Discord limit is 2000)
   chunk_size: 1990
+
+pipeline:
+  # Timeout in seconds for local processing (transcription + minutes generation)
+  processing_timeout_sec: 3600
 
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL

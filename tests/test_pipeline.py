@@ -21,6 +21,7 @@ from src.config import (
     GoogleDriveConfig,
     LoggingConfig,
     MergerConfig,
+    PipelineConfig,
     PosterConfig,
     WhisperConfig,
 )
@@ -56,6 +57,7 @@ def _make_config() -> Config:
         poster=PosterConfig(),
         logging=LoggingConfig(),
         google_drive=GoogleDriveConfig(),
+        pipeline=PipelineConfig(),
     )
 
 
