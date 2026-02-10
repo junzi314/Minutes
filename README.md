@@ -1,213 +1,270 @@
-# Discord Meeting Minutes Bot
+# discord-minutes-bot
 
-Craig Bot の録音終了を自動検知し、文字起こし・議事録生成・Discord投稿を行うボットです。
+Discord音声会議の議事録を自動生成するBot。[Craig Bot](https://craig.horse)の録音をローカルGPUで文字起こしし、Claude APIで議事録にまとめてDiscordチャンネルに投稿する。
 
-## Architecture
+## 仕組み
 
 ```
-Craig Bot Recording End
-        │
-        ▼
- on_raw_message_update (detect Craig panel edit)
-        │
-        ▼
- Cook API → Download per-speaker AAC ZIP
-        │
-        ▼
- faster-whisper (large-v3, GPU) → Per-speaker segments
-        │
-        ▼
- Merger → Chronological transcript [MM:SS] Speaker: text
-        │
-        ▼
- Claude API → Structured Japanese minutes (Markdown)
-        │
-        ▼
- Discord Embed + .md file attachment
+Craig Bot (録音)
+    │
+    ▼
+Google Drive (自動アップロード)
+    │  30秒間隔で監視
+    ▼
+┌─────────────────────────────────┐
+│         minutes-bot              │
+│                                  │
+│  ZIP展開 → FFmpeg変換            │
+│      → faster-whisper 文字起こし │
+│      → 話者統合                  │
+│      → Claude API 議事録生成     │
+│      → Discord投稿              │
+└─────────────────────────────────┘
+    │
+    ▼
+#議事録チャンネル (Embed + .md添付)
 ```
 
-## Prerequisites
+2分の録音から約20秒で議事録を生成する（RTX 3060, CUDA 13.0環境）。
 
-- Python 3.12+
-- NVIDIA GPU with 6+ GB VRAM (tested: RTX 3060 12GB)
-- CUDA driver (verify: `nvidia-smi`)
-- Discord Bot application with `MESSAGE_CONTENT` intent enabled
-- Anthropic API key
-- Craig Bot invited to target Discord server
+## 必要なもの
 
-## Installation
+- **Python** 3.10以上
+- **NVIDIA GPU** VRAM 6GB以上 + CUDA
+- **FFmpeg**
+- **Discord Bot トークン** — [Developer Portal](https://discord.com/developers/applications)で取得
+- **Anthropic API キー** — [console.anthropic.com](https://console.anthropic.com)で取得
+- **Google Cloud サービスアカウント** — Drive監視に使用（自動モードの場合のみ）
+- **Craig Bot** — 対象Discordサーバーに導入済みであること
+
+## インストール
 
 ```bash
-# Clone the repository
-git clone <repo-url>
+git clone https://github.com/yourname/discord-minutes-bot.git
 cd discord-minutes-bot
-
-# Install dependencies
 pip install -r requirements.txt
-pip install -r requirements-dev.txt  # for testing
-
-# Install CUDA runtime libraries (if not already available)
-pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
-
-# Set LD_LIBRARY_PATH for CUDA libs
-export LD_LIBRARY_PATH="$(python3 -c 'import nvidia.cublas; print(nvidia.cublas.__path__[0])')/lib:$(python3 -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH"
 ```
 
-## Configuration
+依存パッケージ:
 
-### 1. Create `.env` file
+```
+discord.py>=2.3
+faster-whisper>=1.0
+anthropic>=0.40
+pyyaml
+python-dotenv
+aiohttp
+ffmpeg-python
+google-api-python-client
+google-auth
+```
+
+## 設定
+
+### 環境変数
 
 ```bash
-DISCORD_BOT_TOKEN=your-bot-token-here
-ANTHROPIC_API_KEY=sk-ant-your-key-here
+cp .env.example .env
 ```
 
-### 2. Edit `config.yaml`
+```env
+DISCORD_BOT_TOKEN=your_discord_bot_token
+ANTHROPIC_API_KEY=sk-ant-your_key
+```
+
+### config.yaml
 
 ```yaml
 discord:
-  guild_id: 123456789012345678       # Your Discord server ID
-  watch_channel_id: 123456789012345678  # Channel where Craig posts
-  output_channel_id: 123456789012345678 # Channel for minutes output
-  error_mention_role_id: null          # Optional: role to ping on errors
+  guild_id: 123456789012345678        # サーバーID
+  watch_channel_id: 123456789012345678 # Craig投稿チャンネルID
+  output_channel_id: 123456789012345678 # 議事録の投稿先チャンネルID
+
+whisper:
+  model: large-v3
+  device: cuda
+  compute_type: float16
+  language: ja
+
+claude:
+  model: claude-sonnet-4-5-20250929
+  max_tokens: 4096
+
+google_drive:
+  enabled: true
+  folder_id: YOUR_CRAIG_FOLDER_ID
+  poll_interval: 30
+  credentials_file: credentials.json
 ```
 
-### Configuration Reference
+Discord IDは、Discordの設定 → 詳細設定 → 開発者モードON にした後、サーバーやチャンネルを右クリック → 「IDをコピー」で取得できる。
 
-| Section | Field | Default | Description |
-|---------|-------|---------|-------------|
-| `discord.guild_id` | -- | **required** | Discord server ID |
-| `discord.watch_channel_id` | -- | **required** | Channel to monitor for Craig |
-| `discord.output_channel_id` | -- | **required** | Channel for minutes output |
-| `discord.error_mention_role_id` | `null` | Optional role ID to mention on errors |
-| `craig.domain` | `craig.chat` | Craig API domain |
-| `craig.cook_format` | `aac` | Audio format (aac, flac, ogg) |
-| `craig.download_timeout_sec` | `300` | Cook API timeout in seconds |
-| `whisper.model` | `large-v3` | Whisper model size |
-| `whisper.language` | `ja` | Transcription language |
-| `whisper.device` | `cuda` | `cuda` or `cpu` |
-| `whisper.compute_type` | `float16` | `float16`, `int8`, `float32` |
-| `whisper.beam_size` | `5` | Beam search width |
-| `whisper.vad_filter` | `true` | Skip silence with VAD |
-| `merger.gap_merge_threshold_sec` | `1.0` | Merge same-speaker gap threshold |
-| `generator.model` | `claude-sonnet-4-5-20250929` | Claude model for generation |
-| `generator.max_tokens` | `4096` | Max output tokens |
-| `generator.temperature` | `0.3` | Generation temperature |
-| `poster.embed_color` | `0x5865F2` | Embed sidebar color |
-| `logging.level` | `INFO` | Log level |
-| `logging.file` | `logs/bot.log` | Log file path |
+### Discord Bot の作成と招待
 
-All config fields can be overridden via environment variables: `SECTION_FIELD` (e.g. `WHISPER_MODEL=medium`).
+1. [Developer Portal](https://discord.com/developers/applications)で「New Application」
+2. Bot → **MESSAGE CONTENT INTENT** を ON
+3. OAuth2 URL Generator で `bot` + `applications.commands` を選択
+4. Bot Permissionsで View Channels / Send Messages / Embed Links / Attach Files / Read Message History を選択
+5. 生成されたURLでサーバーに招待
 
-## Running
+### Google Drive 連携（自動モードの場合）
+
+**Craig側:**
+1. https://craig.horse にDiscordでログイン
+2. Google Drive連携を有効化し、保存形式をAAC マルチトラックに設定
+
+**Google Cloud側:**
+1. [Cloud Console](https://console.cloud.google.com)でプロジェクトを作成
+2. Google Drive APIを有効化
+3. サービスアカウントを作成 → JSONキーをダウンロード
+4. プロジェクトルートに `credentials.json` として配置
+5. Google DriveのCraigフォルダをサービスアカウントのメールアドレスに共有（閲覧者）
+
+## 使い方
+
+### 起動
 
 ```bash
-# Direct
+./start.sh
+```
+
+`start.sh` はCUDA用のライブラリパスを設定してBotを起動する。手動で起動する場合:
+
+```bash
+export LD_LIBRARY_PATH="$(python3 -c 'import nvidia.cublas; print(nvidia.cublas.__path__[0])')/lib:$(python3 -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH"
 python3 bot.py
-
-# With log level override
-python3 bot.py --log-level DEBUG
-
-# With custom config
-python3 bot.py --config /path/to/config.yaml
 ```
 
-## Slash Commands
+### 自動モード（Google Drive監視）
 
-| Command | Description |
-|---------|-------------|
-| `/minutes status` | Show bot uptime, model status, GPU availability |
-| `/minutes process <url>` | Manually process a Craig recording URL |
+Craig Botで録音 → 停止すると、CraigがGoogle Driveに自動アップロードする。Botが30秒間隔で新ファイルを検知し、パイプラインを自動実行する。ユーザー操作は不要。
 
-## systemd Service (Auto-start)
+### 手動モード（スラッシュコマンド）
 
-```bash
-# Copy service file
-mkdir -p ~/.config/systemd/user/
-cp discord-minutes-bot.service ~/.config/systemd/user/
+CraigのDMに届くURLを使う:
 
-# Edit paths if needed
-nano ~/.config/systemd/user/discord-minutes-bot.service
-
-# Enable and start
-systemctl --user daemon-reload
-systemctl --user enable discord-minutes-bot
-systemctl --user start discord-minutes-bot
-
-# Check status
-systemctl --user status discord-minutes-bot
-
-# View logs
-journalctl --user -u discord-minutes-bot -f
+```
+/minutes https://craig.horse/rec/xxxxx?key=yyyyy
 ```
 
-## Testing
+### 出力
 
-```bash
-# Run all unit tests (no GPU required)
-python3 -m pytest tests/ -k "not GPU" -v
+Botは2つのものを投稿する:
 
-# Run GPU integration tests (requires CUDA)
-LD_LIBRARY_PATH=... python3 -m pytest tests/ -k "GPU" -v
+- **Embed** — 会議タイトル・参加者・要約（プレビュー用）
+- **Markdownファイル** — 議題・詳細・決定事項・アクションアイテム（完全版）
 
-# Run everything
-LD_LIBRARY_PATH=... python3 -m pytest tests/ -v
+出力例:
+
+```markdown
+# 会議議事録
+
+## 基本情報
+- 日時: 2026-02-10 18:16
+- 参加者: yamaguchi_314, genki0
+
+## 議題
+### 1. たこ焼きパーティーの計画
+- 開催日の候補について議論
+- 材料の買い出し担当を決定
+
+## 決定事項
+- 来週土曜日に開催
+- 材料はgenki0が担当
+
+## アクションアイテム
+- [ ] genki0: 材料リストを作成して共有
+- [ ] yamaguchi_314: 会場の予約確認
 ```
 
-## Project Structure
+## パイプライン
+
+処理は6段階で、各ステージは独立している。失敗時はDiscordにエラー通知を投稿する。
+
+| ステージ | 処理 | エラー時 |
+|----------|------|----------|
+| `audio_acquisition` | Drive監視 or Craig APIでZIP取得、話者別ファイル展開 | 3回リトライ → 通知 |
+| `preprocessing` | AAC/FLAC → 16kHz mono WAV変換、無音除去 | 通知・中止 |
+| `transcription` | faster-whisper large-v3 (CUDA float16) で話者ごとに処理 | 通知・中止 |
+| `merging` | タイムスタンプで時系列ソート、`[HH:MM:SS] 話者: テキスト`形式に統合 | 通知・中止 |
+| `generation` | Claude Sonnetに統合テキストを送信、構造化Markdown生成 | 3回リトライ → 通知 |
+| `posting` | Embed (要約) + .mdファイル (詳細) をチャンネルに送信 | リトライ → 分割 |
+
+一時ファイルは `try/finally` で確実に削除される。
+
+## プロジェクト構成
 
 ```
 discord-minutes-bot/
-├── bot.py                  # Entry point: Discord client, slash commands
-├── config.yaml             # Default configuration
-├── .env                    # Secrets (gitignored)
-├── requirements.txt        # Python dependencies
-├── discord-minutes-bot.service  # systemd user service
+├── bot.py                     # エントリポイント
+├── start.sh                   # 起動スクリプト
 ├── src/
-│   ├── errors.py           # Exception hierarchy
-│   ├── config.py           # Config loader (YAML + .env)
-│   ├── detector.py         # Craig recording-end detection
-│   ├── audio_source.py     # AudioSource ABC
-│   ├── craig_client.py     # Craig Cook API client
-│   ├── transcriber.py      # faster-whisper wrapper
-│   ├── merger.py           # Transcript merging
-│   ├── generator.py        # Claude API minutes generation
-│   ├── poster.py           # Discord embed + file posting
-│   └── pipeline.py         # Pipeline orchestrator
+│   ├── pipeline.py            # パイプライン制御
+│   ├── craig_client.py        # Craig API クライアント
+│   ├── drive_watcher.py       # Google Drive ポーリング
+│   ├── audio_processor.py     # FFmpeg 変換
+│   ├── transcriber.py         # faster-whisper 推論
+│   ├── transcript_merger.py   # 話者統合
+│   ├── generator.py           # Claude API 呼び出し
+│   ├── poster.py              # Discord 投稿
+│   └── errors.py              # 例外定義
 ├── prompts/
-│   └── minutes.txt         # LLM prompt template
-├── tests/                  # pytest test suite
-├── samples/                # Sample audio for development
-└── logs/                   # Runtime logs (gitignored)
+│   └── minutes.txt            # 議事録生成プロンプト
+├── tests/                     # テスト (110件)
+├── config.yaml
+├── credentials.json           # Google Drive サービスアカウントキー
+├── .env                       # シークレット
+└── requirements.txt
 ```
 
-## Troubleshooting
+## Craig API
 
-### `RuntimeError: Library libcublas.so.12 is not found`
+Craig APIは非公式。ブラウザのDevToolsで調査して特定したエンドポイントを使用している。
 
-Install CUDA runtime libraries and set `LD_LIBRARY_PATH`:
+```
+# ジョブステータス（ポーリング）
+GET https://craig.horse/api/v1/recordings/{rec_id}/job?key={key}
+
+→ status: "complete" になったら outputFileName を取得
+
+# ZIPダウンロード
+GET https://craig.horse/dl/{outputFileName}
+```
+
+CraigはDLリンクをDMにしか送らない（チャンネルには投稿しない）ため、自動化にはGoogle Drive連携が必要。仕様は予告なく変更される可能性がある。
+
+## テスト
 
 ```bash
-pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
-export LD_LIBRARY_PATH="$(python3 -c 'import nvidia.cublas; print(nvidia.cublas.__path__[0])')/lib:$(python3 -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib"
+pytest
 ```
 
-### Bot connects but doesn't detect Craig recordings
+```
+========================= 110 passed in 12.3s =========================
+```
 
-1. Verify `watch_channel_id` matches the channel where Craig posts
-2. Ensure `MESSAGE_CONTENT` intent is enabled in the Discord Developer Portal
-3. Check that Craig Bot is in the same server
-4. Look for detection logs: `grep "Recording ended" logs/bot.log`
+## パフォーマンス
 
-### Transcription produces empty results
+RTX 3060 12GB / CUDA 13.0 / WSL2 Ubuntu 24 で計測:
 
-1. Check GPU availability: `nvidia-smi`
-2. Verify VRAM is sufficient (>6GB free)
-3. Try a smaller model: set `WHISPER_MODEL=medium`
-4. Check audio file exists and is valid
+| 録音時間 | 話者数 | 処理時間 | 内訳 |
+|----------|--------|----------|------|
+| 2分 | 1人 | ~20秒 | DL 0.6s, 文字起こし 8.3s, 生成 9.0s, 投稿 1.5s |
+| 2分 | 2人 | ~25秒 | DL 0.6s, 文字起こし 12s, 生成 9.0s, 投稿 1.5s |
 
-### Claude API errors
+## 既知の制限
 
-1. Verify `ANTHROPIC_API_KEY` in `.env`
-2. Check API quota at console.anthropic.com
-3. The bot retries up to 3 times with exponential backoff
+- Craig APIは非公式のため、仕様変更で動作しなくなる可能性がある（Drive経由のみで運用可能）
+- GPUが必須（CPUフォールバック未実装）
+- 同時に複数の録音が来た場合はキューイングされる
+- Discord Embedは4096文字制限があり、長い議事録はMDファイル添付で対応
+
+## TODO
+
+- [ ] Docker化
+- [ ] 議事録テンプレートのカスタマイズ
+- [ ] 多言語対応
+
+## ライセンス
+
+[MIT](LICENSE)
