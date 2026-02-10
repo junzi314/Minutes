@@ -66,6 +66,8 @@ generator:
 poster:
   # Discord embed sidebar color (hex integer)
   embed_color: 0x5865F2
+  # User IDs to mention when minutes are posted (list of Discord user IDs)
+  mention_user_ids: []
   # Maximum characters per embed description
   max_embed_length: 4000
   # Whether to include the full transcript as a follow-up message

@@ -180,10 +180,12 @@ async def post_minutes(
     """
     embed = build_minutes_embed(minutes_md, date, speakers, cfg)
 
+    mention_text = " ".join(f"<@{uid}>" for uid in cfg.mention_user_ids) or None
+
     async def _send():
         # Recreate File each attempt (discord.py closes the buffer after send)
         file = build_minutes_file(minutes_md, date)
-        return await channel.send(embed=embed, file=file)
+        return await channel.send(content=mention_text, embed=embed, file=file)
 
     message = await _send_with_retry(_send, "Post minutes")
     logger.info(

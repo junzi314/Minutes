@@ -82,6 +82,7 @@ class PosterConfig:
     max_embed_length: int = 4000
     include_transcript: bool = False
     chunk_size: int = 1990
+    mention_user_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -198,7 +199,11 @@ def _build_section(
             target = _resolve_field_type(f.type)
             kwargs[f.name] = _coerce(env_val, target)
         elif f.name in yaml_values:
-            kwargs[f.name] = yaml_values[f.name]
+            value = yaml_values[f.name]
+            # YAML lists → frozen dataclass tuples
+            if isinstance(value, list):
+                value = tuple(value)
+            kwargs[f.name] = value
         # else: rely on dataclass default
 
     return cls(**kwargs)
