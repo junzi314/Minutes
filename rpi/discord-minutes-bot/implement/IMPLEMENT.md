@@ -250,9 +250,47 @@
 
 ---
 
+## Phase 6: Docker化
+
+**Date**: 2026-02-10
+**Verdict**: PASS
+
+### Deliverables
+- [x] Dockerfile: NVIDIA CUDA 12.6 + cuDNN runtime base, Ubuntu 24.04, Python 3.12, ffmpeg, all pip dependencies
+- [x] Non-root user (`botuser`) for container runtime
+- [x] HF_HOME env var for Whisper model cache persistence
+- [x] docker-compose.yml: GPU reservation via nvidia-container-toolkit, volume mounts for all config/secrets
+- [x] Volume mounts: .env (ro), config.yaml (ro), credentials.json (ro), processed_files.json, logs/, whisper-cache (named volume)
+- [x] .dockerignore: excludes secrets, tests, docs, dev files from build context
+- [x] Consistency with start.sh: CUDA libs from base image replace LD_LIBRARY_PATH hack
+
+### Files Changed
+| File | Change Type | Lines |
+|------|-------------|-------|
+| Dockerfile | add | 45 |
+| docker-compose.yml | add | 44 |
+| .dockerignore | add | 39 |
+
+### Code Review
+- Verdict: APPROVED WITH SUGGESTIONS (1 blocker, 2 high, 4 medium)
+- B1 Fixed: added processed_files.json volume mount (Drive watcher tracking persistence)
+- H1 Fixed: added non-root `botuser` + `HF_HOME` env var for whisper cache path
+- H2 Fixed: added `ffmpeg` to apt-get install (audio format safety net)
+- M4 Fixed: added `config.yaml` to .dockerignore
+- Validation: `docker compose config` passes cleanly
+
+### Notes
+- Base image: `nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04` (CUDA 12.6 + cuDNN, runtime-only)
+- Docker eliminates the `LD_LIBRARY_PATH` workaround in start.sh; CUDA libs are native to the base image
+- Whisper model cache (~3 GB) persisted via named volume `whisper-cache` to avoid re-download on container restart
+- PYTHONUNBUFFERED=1 ensures real-time log output in `docker compose logs`
+- Users must `touch processed_files.json` before first run (Docker bind mount requires existing file)
+
+---
+
 ## Summary
 
-**Phases Completed**: 5 of 5
+**Phases Completed**: 6 of 6
 **Final Status**: COMPLETED
 
 ### Phases Executed
@@ -263,6 +301,7 @@
 | Phase 3: Minutes Generation + Discord Posting | PASS | Claude API generator, Discord poster, slash commands, 31 tests |
 | Phase 4: Integration Testing + Hardening | PASS | Pipeline integration tests, retry logic, log masking, systemd, README, 7 tests |
 | Phase 5: Google Drive Monitoring | PASS | Drive watcher, pipeline refactoring, shared ZIP extraction, 17 tests |
+| Phase 6: Docker化 | PASS | GPU Dockerfile, docker-compose.yml, .dockerignore, non-root user |
 
 ### Files Created/Modified
 | File | Description |
@@ -283,6 +322,9 @@
 | `prompts/minutes.txt` | Japanese LLM prompt template |
 | `discord-minutes-bot.service` | systemd user service |
 | `README.md` | Setup guide, config reference, troubleshooting |
+| `Dockerfile` | GPU-enabled Docker image (NVIDIA CUDA 12.6 + Python 3.12) |
+| `docker-compose.yml` | Compose config with GPU, volumes, restart policy |
+| `.dockerignore` | Build context exclusion rules |
 | `tests/test_detector.py` | 16 tests |
 | `tests/test_craig_client.py` | 9 tests |
 | `tests/test_config.py` | 10 tests |
@@ -298,8 +340,7 @@
 - **All passing**: zero failures, zero regressions
 
 ### Next Steps
-1. Set `google_drive.enabled: true` and `google_drive.folder_id` in config.yaml
-2. Share the Craig Drive folder with the service account email
-3. Upload a Craig recording ZIP to the folder and verify auto-processing
-4. Run manual validation with a real Craig recording (Task 4.6)
-5. Deploy via systemd and verify in production
+1. `docker compose up -d --build` to build and start the container
+2. `docker compose logs -f` to verify startup and GPU detection
+3. Run manual validation with a real Craig recording (Task 4.6)
+4. Verify Whisper model downloads and persists across container restart

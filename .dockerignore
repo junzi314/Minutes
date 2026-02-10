@@ -1,0 +1,39 @@
+# Secrets (mounted at runtime, never baked into image)
+.env
+credentials.json
+processed_files.json
+
+# Runtime data
+logs/
+tmp/
+samples/
+
+# Development / CI
+tests/
+docs/
+rpi/
+reports/
+.claude/
+.git/
+.gitignore
+.pytest_cache/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Config (mounted at runtime)
+config.yaml
+
+# Misc
+README.md
+discord-minutes-bot.service
+start.sh
+requirements-dev.txt
