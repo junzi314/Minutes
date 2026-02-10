@@ -114,8 +114,10 @@ class CraigClient(AudioSource):
         button.  Without it, GET polling never sees a running job.
         """
         payload = {
+            "type": "recording",
             "format": self._cfg.cook_format,
             "container": self._cfg.cook_container,
+            "dynaudnorm": False,
         }
         logger.info(
             "Starting cook job for recording %s (format=%s, container=%s)",

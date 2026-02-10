@@ -155,8 +155,10 @@ async def test_start_job_sends_post_with_format(
             _, calls = post_calls[0]
             assert len(calls) == 1
             body = calls[0].kwargs.get("json", {})
+            assert body["type"] == "recording"
             assert body["format"] == "aac"
             assert body["container"] == "zip"
+            assert body["dynaudnorm"] is False
 
 
 @pytest.mark.asyncio
