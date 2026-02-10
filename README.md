@@ -76,9 +76,9 @@ ANTHROPIC_API_KEY=sk-ant-your_key
 
 ```yaml
 discord:
-  guild_id: 123456789012345678        # サーバーID
-  watch_channel_id: 123456789012345678 # Craig投稿チャンネルID
-  output_channel_id: 123456789012345678 # 議事録の投稿先チャンネルID
+  guild_id:         # サーバーID
+  watch_channel_id:  # Craig投稿チャンネルID
+  output_channel_id:  # 議事録の投稿先チャンネルID
 
 whisper:
   model: large-v3
@@ -259,12 +259,5 @@ RTX 3060 12GB / CUDA 13.0 / WSL2 Ubuntu 24 で計測:
 - 同時に複数の録音が来た場合はキューイングされる
 - Discord Embedは4096文字制限があり、長い議事録はMDファイル添付で対応
 
-## TODO
-
-- [ ] Docker化
-- [ ] 議事録テンプレートのカスタマイズ
-- [ ] 多言語対応
-
-## ライセンス
 
 [MIT](LICENSE)
