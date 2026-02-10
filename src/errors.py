@@ -23,6 +23,11 @@ class CookTimeoutError(AudioAcquisitionError):
     pass
 
 
+class ProcessingTimeoutError(MinutesBotError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, stage="processing")
+
+
 class TranscriptionError(MinutesBotError):
     def __init__(self, message: str) -> None:
         super().__init__(message, stage="transcription")

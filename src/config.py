@@ -45,6 +45,7 @@ class CraigConfig:
     cook_format: str = "aac"
     cook_container: str = "zip"
     download_timeout_sec: int = 300
+    poll_timeout_sec: int = 600
     max_retries: int = 2
 
 
@@ -81,6 +82,12 @@ class PosterConfig:
     max_embed_length: int = 4000
     include_transcript: bool = False
     chunk_size: int = 1990
+    mention_user_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    processing_timeout_sec: int = 3600
 
 
 @dataclass(frozen=True)
@@ -111,6 +118,7 @@ class Config:
     poster: PosterConfig
     logging: LoggingConfig
     google_drive: GoogleDriveConfig
+    pipeline: PipelineConfig
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +135,7 @@ _SECTION_CLASSES: dict[str, type] = {
     "poster": PosterConfig,
     "logging": LoggingConfig,
     "google_drive": GoogleDriveConfig,
+    "pipeline": PipelineConfig,
 }
 
 
@@ -190,7 +199,11 @@ def _build_section(
             target = _resolve_field_type(f.type)
             kwargs[f.name] = _coerce(env_val, target)
         elif f.name in yaml_values:
-            kwargs[f.name] = yaml_values[f.name]
+            value = yaml_values[f.name]
+            # YAML lists → frozen dataclass tuples
+            if isinstance(value, list):
+                value = tuple(value)
+            kwargs[f.name] = value
         # else: rely on dataclass default
 
     return cls(**kwargs)
@@ -232,8 +245,14 @@ def _validate(cfg: Config) -> None:
     # Craig
     if cfg.craig.download_timeout_sec < 1:
         errors.append("craig.download_timeout_sec must be >= 1")
+    if cfg.craig.poll_timeout_sec < 1:
+        errors.append("craig.poll_timeout_sec must be >= 1")
     if cfg.craig.max_retries < 0:
         errors.append("craig.max_retries must be >= 0")
+
+    # Pipeline
+    if cfg.pipeline.processing_timeout_sec < 1:
+        errors.append("pipeline.processing_timeout_sec must be >= 1")
 
     # Poster
     if cfg.poster.max_embed_length < 1:

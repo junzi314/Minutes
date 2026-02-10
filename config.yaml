@@ -24,6 +24,8 @@ craig:
   cook_container: "zip"
   # Timeout in seconds for the Cook API download request
   download_timeout_sec: 300
+  # Timeout in seconds for job API polling (waiting for cook to complete)
+  poll_timeout_sec: 600
   # Number of retry attempts on failure
   max_retries: 2
 
@@ -64,12 +66,18 @@ generator:
 poster:
   # Discord embed sidebar color (hex integer)
   embed_color: 0x5865F2
+  # User IDs to mention when minutes are posted (list of Discord user IDs)
+  mention_user_ids: []
   # Maximum characters per embed description
   max_embed_length: 4000
   # Whether to include the full transcript as a follow-up message
   include_transcript: false
   # Maximum characters per message chunk (Discord limit is 2000)
   chunk_size: 1990
+
+pipeline:
+  # Timeout in seconds for local processing (transcription + minutes generation)
+  processing_timeout_sec: 3600
 
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL

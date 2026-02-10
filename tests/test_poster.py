@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import discord
+import pytest
 
 from src.config import PosterConfig
 from src.poster import (
@@ -11,6 +14,7 @@ from src.poster import (
     build_error_embed,
     build_minutes_embed,
     build_minutes_file,
+    post_minutes,
 )
 from src.poster import _SUMMARY_PATTERN, _DECISIONS_PATTERN
 
@@ -171,3 +175,37 @@ class TestBuildMinutesFile:
         f = build_minutes_file("content", "2026/02/10 14:00")
         assert "/" not in f.filename
         assert " " not in f.filename
+
+
+# --- post_minutes mention ---
+
+
+class TestPostMinutesMention:
+    @pytest.mark.asyncio
+    async def test_mention_user_ids_included(self) -> None:
+        cfg = PosterConfig(mention_user_ids=(111, 222))
+        channel = MagicMock()
+        msg = MagicMock()
+        msg.id = 1
+        channel.send = AsyncMock(return_value=msg)
+        channel.name = "test"
+
+        await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", cfg)
+
+        call_kwargs = channel.send.call_args.kwargs
+        assert "<@111>" in call_kwargs["content"]
+        assert "<@222>" in call_kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_no_mention_when_empty(self) -> None:
+        cfg = PosterConfig(mention_user_ids=())
+        channel = MagicMock()
+        msg = MagicMock()
+        msg.id = 1
+        channel.send = AsyncMock(return_value=msg)
+        channel.name = "test"
+
+        await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", cfg)
+
+        call_kwargs = channel.send.call_args.kwargs
+        assert call_kwargs["content"] is None

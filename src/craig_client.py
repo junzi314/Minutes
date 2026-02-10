@@ -1,8 +1,9 @@
 """Craig recording download client using the v1 Job API.
 
-Verified API flow (from DevTools observation):
-  1. GET /api/v1/recordings/{rec_id}/job?key={key}  ->  poll until job.status == "complete"
-  2. GET /dl/{outputFileName}                         ->  download the cooked ZIP file
+Verified API flow (from browser DevTools observation):
+  1. POST /api/v1/recordings/{rec_id}/job?key={key}  ->  start the cook job (format + container)
+  2. GET  /api/v1/recordings/{rec_id}/job?key={key}   ->  poll until job.status == "complete"
+  3. GET  /dl/{outputFileName}                         ->  download the cooked ZIP file
 """
 
 from __future__ import annotations
@@ -29,8 +30,9 @@ class CraigClient(AudioSource):
     """Download per-speaker audio files from Craig via the Job API.
 
     The Job API flow:
-      1. GET /api/v1/recordings/{rec_id}/job?key={key}  ->  poll until job.status == "complete"
-      2. GET /dl/{job.outputFileName}                    ->  download the cooked ZIP
+      1. POST /api/v1/recordings/{rec_id}/job?key={key}  ->  start the cook job
+      2. GET  /api/v1/recordings/{rec_id}/job?key={key}   ->  poll until job.status == "complete"
+      3. GET  /dl/{job.outputFileName}                     ->  download the cooked ZIP
     """
 
     def __init__(
@@ -60,12 +62,13 @@ class CraigClient(AudioSource):
         )
 
     async def download(self, dest_dir: Path) -> list[SpeakerAudio]:
-        """Poll the job API and download per-speaker audio files.
+        """Start the cook job, poll until complete, and download per-speaker audio files.
 
         Flow:
-          1. Poll GET /api/v1/recordings/{rec_id}/job until complete
-          2. Download ZIP from /dl/{outputFileName}
-          3. Extract per-speaker audio files
+          1. POST to start the cook job (format + container)
+          2. Poll GET /api/v1/recordings/{rec_id}/job until complete
+          3. Download ZIP from /dl/{outputFileName}
+          4. Extract per-speaker audio files
         """
         dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -74,15 +77,18 @@ class CraigClient(AudioSource):
             f"/job?key={self._recording.access_key}"
         )
 
-        # Step 1: Poll until job completes -> returns outputFileName
+        # Step 1: Start the cook job
+        await self._start_job(job_url)
+
+        # Step 2: Poll until job completes -> returns outputFileName
         output_filename = await self._poll_until_complete(job_url)
 
-        # Step 2: Download the cooked ZIP file
+        # Step 3: Download the cooked ZIP file
         dl_url = f"{self._base_url}/dl/{output_filename}"
         logger.info("Downloading cooked file from %s", dl_url)
         zip_bytes = await self._download_bytes(dl_url)
 
-        # Step 3: Extract ZIP
+        # Step 4: Extract ZIP
         results = self._extract_zip(zip_bytes, dest_dir)
 
         if not results:
@@ -101,6 +107,40 @@ class CraigClient(AudioSource):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _start_job(self, job_url: str) -> None:
+        """POST to start the cook job with configured format and container.
+
+        The Craig web UI sends this POST when the user clicks an audio format
+        button.  Without it, GET polling never sees a running job.
+        """
+        payload = {
+            "format": self._cfg.cook_format,
+            "container": self._cfg.cook_container,
+        }
+        logger.info(
+            "Starting cook job for recording %s (format=%s, container=%s)",
+            self._recording.rec_id,
+            self._cfg.cook_format,
+            self._cfg.cook_container,
+        )
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with self._session.post(
+                job_url, json=payload, timeout=timeout,
+            ) as resp:
+                if resp.status in (200, 201):
+                    logger.info("Cook job started (HTTP %d)", resp.status)
+                else:
+                    resp_text = await resp.text()
+                    logger.warning(
+                        "Cook job start returned HTTP %d: %s",
+                        resp.status,
+                        resp_text[:200],
+                    )
+        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            # Non-fatal: the job may already be running from a previous attempt.
+            logger.warning("Cook job start request failed (non-fatal): %s", exc)
+
     async def _poll_until_complete(self, job_url: str) -> str:
         """Poll GET /api/v1/recordings/{rec_id}/job until job.status == "complete".
 
@@ -117,12 +157,12 @@ class CraigClient(AudioSource):
         }
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._cfg.download_timeout_sec
+        deadline = loop.time() + self._cfg.poll_timeout_sec
 
         logger.info(
             "Polling job status for recording %s (timeout=%ds)",
             self._recording.rec_id,
-            self._cfg.download_timeout_sec,
+            self._cfg.poll_timeout_sec,
         )
 
         while loop.time() < deadline:
@@ -167,7 +207,7 @@ class CraigClient(AudioSource):
             await asyncio.sleep(_JOB_POLL_INTERVAL)
 
         raise CookTimeoutError(
-            f"Job polling timed out after {self._cfg.download_timeout_sec}s "
+            f"Job polling timed out after {self._cfg.poll_timeout_sec}s "
             f"for recording {self._recording.rec_id}"
         )
 
