@@ -40,8 +40,8 @@ Google Drive (自動アップロード)
 ## インストール
 
 ```bash
-git clone https://github.com/yourname/discord-minutes-bot.git
-cd discord-minutes-bot
+git clone https://github.com/junzi314/Minutes.git
+cd Minutes
 pip install -r requirements.txt
 ```
 
@@ -76,8 +76,8 @@ ANTHROPIC_API_KEY=sk-ant-your_key
 
 ```yaml
 discord:
-  guild_id:         # サーバーID
-  watch_channel_id:  # Craig投稿チャンネルID
+  guild_id:   # サーバーID
+  watch_channel_id: # Craig投稿チャンネルID
   output_channel_id:  # 議事録の投稿先チャンネルID
 
 whisper:
@@ -134,6 +134,16 @@ Discord IDは、Discordの設定 → 詳細設定 → 開発者モードON に�
 export LD_LIBRARY_PATH="$(python3 -c 'import nvidia.cublas; print(nvidia.cublas.__path__[0])')/lib:$(python3 -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH"
 python3 bot.py
 ```
+
+### Docker で起動
+
+nvidia-container-toolkit がインストールされている環境なら Docker で動かせる。
+
+```bash
+docker compose up -d
+```
+
+`.env`、`config.yaml`、`credentials.json` はボリュームマウントで渡す（イメージに含まれない）。`docker-compose.yml` を参照。
 
 ### 自動モード（Google Drive監視）
 
@@ -198,6 +208,8 @@ Botは2つのものを投稿する:
 discord-minutes-bot/
 ├── bot.py                     # エントリポイント
 ├── start.sh                   # 起動スクリプト
+├── Dockerfile
+├── docker-compose.yml
 ├── src/
 │   ├── pipeline.py            # パイプライン制御
 │   ├── craig_client.py        # Craig API クライアント
@@ -212,10 +224,13 @@ discord-minutes-bot/
 │   └── minutes.txt            # 議事録生成プロンプト
 ├── tests/                     # テスト (110件)
 ├── config.yaml
-├── credentials.json           # Google Drive サービスアカウントキー
-├── .env                       # シークレット
+├── credentials.json           # Google Drive サービスアカウントキー（※gitignore対象）
+├── .env                       # シークレット（※gitignore対象）
+├── .gitignore
 └── requirements.txt
 ```
+
+`credentials.json` と `.env` は `.gitignore` に含まれており、リポジトリにはpushされない。
 
 ## Craig API
 
@@ -259,5 +274,6 @@ RTX 3060 12GB / CUDA 13.0 / WSL2 Ubuntu 24 で計測:
 - 同時に複数の録音が来た場合はキューイングされる
 - Discord Embedは4096文字制限があり、長い議事録はMDファイル添付で対応
 
+## ライセンス
 
 [MIT](LICENSE)
