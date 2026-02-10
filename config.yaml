@@ -1,0 +1,96 @@
+# Discord Minutes Bot - Configuration
+# ====================================
+# Discord IDs must be filled in before running the bot.
+# Secrets (token, API key) are loaded from .env, NOT this file.
+
+discord:
+  # Discord server (guild) ID
+  guild_id: 1378334580318408724
+  # Channel ID where Craig Bot posts recording messages
+  watch_channel_id: 1470642847060328541
+  # Channel ID where meeting minutes will be posted
+  output_channel_id: 1470643395679748156
+  # Role ID to mention when errors occur (optional, set to null to disable)
+  error_mention_role_id: null
+
+craig:
+  # Craig Bot user ID (do not change unless Craig Bot changes)
+  bot_id: "272937604339466240"
+  # Craig download domain
+  domain: "craig.chat"
+  # Audio format for Cook API: aac, flac, ogg, mp3, wav
+  cook_format: "aac"
+  # Container format: zip, mix (zip = per-speaker files)
+  cook_container: "zip"
+  # Timeout in seconds for the Cook API download request
+  download_timeout_sec: 300
+  # Number of retry attempts on failure
+  max_retries: 2
+
+whisper:
+  # Model size: tiny, base, small, medium, large-v1, large-v2, large-v3, etc.
+  model: "large-v3"
+  # Language code (ISO 639-1): ja, en, zh, etc.
+  language: "ja"
+  # Device: cuda or cpu
+  device: "cuda"
+  # Compute type: float16, int8, int8_float16, float32
+  compute_type: "float16"
+  # Beam size for decoding (higher = more accurate but slower)
+  beam_size: 5
+  # Enable Voice Activity Detection to skip silence
+  vad_filter: true
+
+merger:
+  # Timestamp format in transcript (available: {mm}, {ss}, {hh})
+  timestamp_format: "[{mm}:{ss}]"
+  # Minimum characters for a segment to be included
+  min_segment_chars: 1
+  # Merge consecutive segments from same speaker if gap is below this (seconds)
+  gap_merge_threshold_sec: 1.0
+
+generator:
+  # Anthropic model for minutes generation
+  model: "claude-sonnet-4-5-20250929"
+  # Maximum tokens in the generated response
+  max_tokens: 4096
+  # Temperature (0.0 = deterministic, 1.0 = creative)
+  temperature: 0.3
+  # Path to the prompt template file
+  prompt_template_path: "prompts/minutes.txt"
+  # Number of retry attempts on API failure
+  max_retries: 2
+
+poster:
+  # Discord embed sidebar color (hex integer)
+  embed_color: 0x5865F2
+  # Maximum characters per embed description
+  max_embed_length: 4000
+  # Whether to include the full transcript as a follow-up message
+  include_transcript: false
+  # Maximum characters per message chunk (Discord limit is 2000)
+  chunk_size: 1990
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+  # Log file path
+  file: "logs/bot.log"
+  # Maximum log file size in bytes (default: 10 MB)
+  max_bytes: 10485760
+  # Number of rotated log files to keep
+  backup_count: 5
+
+google_drive:
+  # Enable Google Drive folder monitoring
+  enabled: true
+  # Path to service account JSON key file
+  credentials_path: "credentials.json"
+  # Google Drive folder ID to monitor (get from folder URL)
+  folder_id: "18JpLtd8T_fzGOnHUei6cAO0NWty_qgSD"
+  # Filename glob pattern to match Craig ZIP exports
+  file_pattern: "craig_*.aac.zip"
+  # Polling interval in seconds
+  poll_interval_sec: 30
+  # Path to processed files tracking database (JSON)
+  processed_db_path: "processed_files.json"

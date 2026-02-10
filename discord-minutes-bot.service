@@ -1,0 +1,20 @@
+[Unit]
+Description=Discord Meeting Minutes Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/junzi/projects/discord-minutes-bot
+ExecStart=/usr/bin/python3 bot.py
+Restart=on-failure
+RestartSec=10
+
+# CUDA runtime libraries (nvidia pip packages)
+Environment=LD_LIBRARY_PATH=/home/junzi/.local/lib/python3.12/site-packages/nvidia/cublas/lib:/home/junzi/.local/lib/python3.12/site-packages/nvidia/cudnn/lib
+
+# Prevent OOM killer from targeting the bot
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=default.target
