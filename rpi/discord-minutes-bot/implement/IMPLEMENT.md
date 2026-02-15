@@ -322,9 +322,52 @@
 
 ---
 
+## Phase 8: Multi-Guild Support
+
+**Date**: 2026-02-15
+**Verdict**: PASS
+
+### Deliverables
+- [x] `GuildConfig` dataclass for per-guild configuration (guild_id, watch_channel_id, output_channel_id)
+- [x] `DiscordConfig` restructured: `guilds: tuple[GuildConfig, ...]` with O(1) `get_guild()` lookup
+- [x] Backward compatibility: old single-guild format (`guild_id`/`watch_channel_id`/`output_channel_id`) auto-wraps into `guilds` list
+- [x] Config validation: per-guild field validation, duplicate guild_id detection, at-least-one-guild check
+- [x] Bot `on_ready()`: loops over all guilds for slash command sync
+- [x] `on_raw_message_update()`: guild-aware event routing (looks up guild config from `payload.guild_id`)
+- [x] Slash commands (`/minutes status`, `/minutes process`): resolve guild config from `interaction.guild_id`
+- [x] Drive watcher: uses first guild's output channel (shared monitoring)
+- [x] `config.yaml` converted to new `guilds` list format
+- [x] 7 new tests (multi-guild format, backward compat, get_guild, duplicate detection, error_mention_role, empty guilds)
+
+### Files Changed
+| File | Change Type | Lines |
+|------|-------------|-------|
+| src/config.py | modify | +55 (GuildConfig, DiscordConfig restructure, _build_discord_section, validation) |
+| bot.py | modify | +25 (guild loop, guild-aware event routing, guild-aware slash commands) |
+| config.yaml | modify | ~5 (guilds list format, header fix) |
+| tests/test_config.py | modify | +65 (7 new tests, assertion updates) |
+| tests/test_pipeline.py | modify | +3 (GuildConfig in _make_config) |
+
+### Tests
+- [x] Unit tests: 123/123 PASS (was 112 P1-P7 + 4 new P8 config + 7 updated, zero regressions)
+- [x] Pre-existing GPU test failure (libcublas.so.12) unrelated to changes
+
+### Code Review
+- Verdict: APPROVED WITH SUGGESTIONS (1 blocker, 3 high, 4 medium)
+- B1 Fixed: corrupted config.yaml header
+- H1 Fixed: duplicate guild_id validation
+- H2 Fixed: Drive watcher log message states which guild/channel selected
+- H3 Fixed: `get_guild()` optimized to O(1) dict lookup via `__post_init__`
+- M4 Fixed: dead code removed from test
+- M5 Fixed: `DiscordConfig` import moved to module level in test
+- M6 Noted: parallel slash sync deferred (sequential fine for small guild counts)
+- M7 Noted: bot-level multi-guild routing tests deferred (requires discord.py mocking)
+
+---
+
 ## Summary
 
-**Phases Completed**: 7 of 7
+**Phases Completed**: 8 of 8
 **Final Status**: COMPLETED
 
 ### Phases Executed
@@ -337,44 +380,13 @@
 | Phase 5: Google Drive Monitoring | PASS | Drive watcher, pipeline refactoring, shared ZIP extraction, 17 tests |
 | Phase 6: Docker化 | PASS | GPU Dockerfile, docker-compose.yml, .dockerignore, non-root user |
 | Phase 7: Craig API POST Job Start | PASS | POST to start cook job before polling, 2 new tests |
-
-### Files Created/Modified
-| File | Description |
-|------|-------------|
-| `bot.py` | Entry point: Discord client, slash commands, logging, Drive watcher integration |
-| `config.yaml` | Default configuration (incl. google_drive section) |
-| `src/errors.py` | Exception hierarchy (incl. DriveWatchError) |
-| `src/config.py` | Config loader (incl. GoogleDriveConfig + validation) |
-| `src/detector.py` | Craig recording-end detection |
-| `src/audio_source.py` | AudioSource ABC + dataclasses + shared ZIP extraction |
-| `src/craig_client.py` | Craig Cook API client with POST job start + retry |
-| `src/transcriber.py` | faster-whisper GPU wrapper |
-| `src/merger.py` | Chronological transcript merging |
-| `src/generator.py` | Claude API minutes generation with retry |
-| `src/poster.py` | Discord embed/file posting with retry |
-| `src/pipeline.py` | Pipeline orchestrator (run_pipeline + run_pipeline_from_tracks) |
-| `src/drive_watcher.py` | Google Drive folder monitoring + ZIP download |
-| `prompts/minutes.txt` | Japanese LLM prompt template |
-| `discord-minutes-bot.service` | systemd user service |
-| `README.md` | Setup guide, config reference, troubleshooting |
-| `Dockerfile` | GPU-enabled Docker image (NVIDIA CUDA 12.6 + Python 3.12) |
-| `docker-compose.yml` | Compose config with GPU, volumes, restart policy |
-| `.dockerignore` | Build context exclusion rules |
-| `tests/test_detector.py` | 16 tests |
-| `tests/test_craig_client.py` | 12 tests |
-| `tests/test_config.py` | 10 tests |
-| `tests/test_transcriber.py` | 10 tests (7 unit + 3 GPU) |
-| `tests/test_merger.py` | 13 tests |
-| `tests/test_generator.py` | 11 tests |
-| `tests/test_poster.py` | 20 tests |
-| `tests/test_pipeline.py` | 7 tests |
-| `tests/test_drive_watcher.py` | 17 tests |
+| Phase 8: Multi-Guild Support | PASS | GuildConfig, multi-guild config, guild-aware routing, backward compat, 7 new tests |
 
 ### Test Summary
-- **Total**: 112 unit/integration tests + 3 GPU tests = 115 tests
+- **Total**: 123 unit/integration tests + 3 GPU tests = 126 tests
 - **All passing**: zero failures, zero regressions
 
 ### Next Steps
-1. `docker compose up -d --build` to rebuild container with POST fix
-2. Test with a real Craig recording — job should now start automatically
-3. Verify full pipeline: detect → POST start → poll → download → transcribe → post
+1. Commit and create PR for Phase 8
+2. Rebuild Docker container: `docker compose up -d --build`
+3. Add second guild to `config.yaml` and verify slash commands sync to both

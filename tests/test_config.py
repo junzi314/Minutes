@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import Config, load
+from src.config import Config, DiscordConfig, GuildConfig, load
 from src.errors import ConfigError
 
 
@@ -53,7 +53,11 @@ class TestLoadValidConfig:
         cfg = load(str(cfg_path), str(env_path))
         assert isinstance(cfg, Config)
         assert cfg.discord.token == "test-token-123"
-        assert cfg.discord.guild_id == 123456789
+        # Old single-guild format auto-wraps into guilds list
+        assert len(cfg.discord.guilds) == 1
+        assert cfg.discord.guilds[0].guild_id == 123456789
+        assert cfg.discord.guilds[0].watch_channel_id == 111222333
+        assert cfg.discord.guilds[0].output_channel_id == 444555666
         assert cfg.generator.api_key == "sk-test-key"
         assert cfg.whisper.model == "large-v3"  # default
 
@@ -193,3 +197,112 @@ class TestValidation:
     def test_missing_config_file(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="Config file not found"):
             load(str(tmp_path / "nonexistent.yaml"))
+
+    def test_empty_guilds_list(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds: []
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="at least one guild"):
+            load(str(cfg_path), str(env_path))
+
+
+class TestMultiGuild:
+    def test_multi_guild_format(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 111
+                  watch_channel_id: 222
+                  output_channel_id: 333
+                - guild_id: 444
+                  watch_channel_id: 555
+                  output_channel_id: 666
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert len(cfg.discord.guilds) == 2
+        assert cfg.discord.guilds[0].guild_id == 111
+        assert cfg.discord.guilds[0].watch_channel_id == 222
+        assert cfg.discord.guilds[0].output_channel_id == 333
+        assert cfg.discord.guilds[1].guild_id == 444
+        assert cfg.discord.guilds[1].watch_channel_id == 555
+        assert cfg.discord.guilds[1].output_channel_id == 666
+
+    def test_backward_compat_single_guild(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Old single-guild format is automatically wrapped into guilds list."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 999
+              watch_channel_id: 888
+              output_channel_id: 777
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert len(cfg.discord.guilds) == 1
+        assert cfg.discord.guilds[0].guild_id == 999
+        assert cfg.discord.guilds[0].watch_channel_id == 888
+        assert cfg.discord.guilds[0].output_channel_id == 777
+
+    def test_get_guild_found(self) -> None:
+        g1 = GuildConfig(guild_id=100, watch_channel_id=200, output_channel_id=300)
+        g2 = GuildConfig(guild_id=400, watch_channel_id=500, output_channel_id=600)
+        dc = DiscordConfig(token="tok", guilds=(g1, g2))
+        assert dc.get_guild(400) is g2
+        assert dc.get_guild(100) is g1
+
+    def test_get_guild_not_found(self) -> None:
+        g1 = GuildConfig(guild_id=100, watch_channel_id=200, output_channel_id=300)
+        dc = DiscordConfig(token="tok", guilds=(g1,))
+        assert dc.get_guild(999) is None
+
+    def test_duplicate_guild_id_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 111
+                  watch_channel_id: 222
+                  output_channel_id: 333
+                - guild_id: 111
+                  watch_channel_id: 444
+                  output_channel_id: 555
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="duplicated"):
+            load(str(cfg_path), str(env_path))
+
+    def test_error_mention_role_shared(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """error_mention_role_id is shared across all guilds."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  watch_channel_id: 2
+                  output_channel_id: 3
+              error_mention_role_id: 12345
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.discord.error_mention_role_id == 12345
+        assert len(cfg.discord.guilds) == 1

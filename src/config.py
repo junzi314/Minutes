@@ -30,12 +30,28 @@ VALID_WHISPER_MODELS = frozenset({
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class DiscordConfig:
-    token: str
+class GuildConfig:
+    """Per-guild configuration (guild ID, watch channel, output channel)."""
+
     guild_id: int
     watch_channel_id: int
     output_channel_id: int
+
+
+@dataclass(frozen=True)
+class DiscordConfig:
+    token: str
+    guilds: tuple[GuildConfig, ...]
     error_mention_role_id: int | None = None
+
+    def __post_init__(self) -> None:
+        # Build O(1) lookup map (object.__setattr__ needed for frozen dataclass)
+        guild_map = {g.guild_id: g for g in self.guilds}
+        object.__setattr__(self, "_guild_map", guild_map)
+
+    def get_guild(self, guild_id: int) -> GuildConfig | None:
+        """Look up guild config by guild_id (O(1)). Returns None if not found."""
+        return self._guild_map.get(guild_id)  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True)
@@ -127,7 +143,6 @@ class Config:
 
 # Maps section names to their dataclass types.
 _SECTION_CLASSES: dict[str, type] = {
-    "discord": DiscordConfig,
     "craig": CraigConfig,
     "whisper": WhisperConfig,
     "merger": MergerConfig,
@@ -209,6 +224,63 @@ def _build_section(
     return cls(**kwargs)
 
 
+def _build_discord_section(yaml_section: dict) -> DiscordConfig:
+    """Build DiscordConfig from YAML, supporting both old and new formats.
+
+    Old format (single guild)::
+
+        discord:
+          guild_id: 123
+          watch_channel_id: 456
+          output_channel_id: 789
+
+    New format (multi-guild)::
+
+        discord:
+          guilds:
+            - guild_id: 123
+              watch_channel_id: 456
+              output_channel_id: 789
+    """
+    if not isinstance(yaml_section, dict):
+        raise ConfigError(
+            f"Config section 'discord' must be a mapping, got {type(yaml_section).__name__}"
+        )
+
+    error_mention_role_id = yaml_section.get("error_mention_role_id")
+
+    if "guilds" in yaml_section:
+        # New format: list of guild entries
+        raw_guilds = yaml_section["guilds"]
+        if not isinstance(raw_guilds, list):
+            raise ConfigError("discord.guilds must be a list")
+        guild_configs: list[GuildConfig] = []
+        for i, entry in enumerate(raw_guilds):
+            if not isinstance(entry, dict):
+                raise ConfigError(f"discord.guilds[{i}] must be a mapping")
+            guild_configs.append(GuildConfig(
+                guild_id=entry.get("guild_id", 0),
+                watch_channel_id=entry.get("watch_channel_id", 0),
+                output_channel_id=entry.get("output_channel_id", 0),
+            ))
+        guilds = tuple(guild_configs)
+    elif "guild_id" in yaml_section:
+        # Old format (backward compat): wrap single guild into a list
+        guilds = (GuildConfig(
+            guild_id=yaml_section.get("guild_id", 0),
+            watch_channel_id=yaml_section.get("watch_channel_id", 0),
+            output_channel_id=yaml_section.get("output_channel_id", 0),
+        ),)
+    else:
+        guilds = ()
+
+    return DiscordConfig(
+        token=yaml_section.get("token", ""),
+        guilds=guilds,
+        error_mention_role_id=error_mention_role_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -220,12 +292,21 @@ def _validate(cfg: Config) -> None:
     # Discord
     if not cfg.discord.token:
         errors.append("discord.token is required (set DISCORD_BOT_TOKEN or DISCORD_TOKEN env var)")
-    if cfg.discord.guild_id <= 0:
-        errors.append("discord.guild_id must be a positive integer")
-    if cfg.discord.watch_channel_id <= 0:
-        errors.append("discord.watch_channel_id must be a positive integer")
-    if cfg.discord.output_channel_id <= 0:
-        errors.append("discord.output_channel_id must be a positive integer")
+    if not cfg.discord.guilds:
+        errors.append("discord.guilds must contain at least one guild entry")
+    seen_guild_ids: set[int] = set()
+    for i, guild in enumerate(cfg.discord.guilds):
+        prefix = f"discord.guilds[{i}]"
+        if guild.guild_id <= 0:
+            errors.append(f"{prefix}.guild_id must be a positive integer")
+        elif guild.guild_id in seen_guild_ids:
+            errors.append(f"{prefix}.guild_id {guild.guild_id} is duplicated")
+        else:
+            seen_guild_ids.add(guild.guild_id)
+        if guild.watch_channel_id <= 0:
+            errors.append(f"{prefix}.watch_channel_id must be a positive integer")
+        if guild.output_channel_id <= 0:
+            errors.append(f"{prefix}.output_channel_id must be a positive integer")
 
     # Whisper
     if cfg.whisper.model not in VALID_WHISPER_MODELS:
@@ -297,28 +378,26 @@ def load(config_path: str = "config.yaml", env_path: str = ".env") -> Config:
     with open(yaml_path, encoding="utf-8") as fh:
         raw: dict = yaml.safe_load(fh) or {}
 
-    # 3. Build each section
-    #    For discord.token and generator.api_key: use placeholder empty strings
-    #    since these are injected from env vars in step 4 below.
+    # 3. Build each section (except discord, which needs custom handling)
     sections: dict[str, object] = {}
     for section_name, cls in _SECTION_CLASSES.items():
         yaml_section = raw.get(section_name, {}) or {}
         if not isinstance(yaml_section, dict):
             raise ConfigError(f"Config section '{section_name}' must be a mapping, got {type(yaml_section).__name__}")
-        # Provide defaults for required fields that are always set via env vars
-        if section_name == "discord":
-            yaml_section.setdefault("token", "")
         sections[section_name] = _build_section(section_name, cls, yaml_section)
 
-    # 4. Inject secrets that use non-standard env-var names
-    discord_section: dict = {}
-    for f in fields(DiscordConfig):
-        discord_section[f.name] = getattr(sections["discord"], f.name)
+    # 3b. Build discord section with multi-guild support + backward compat
+    sections["discord"] = _build_discord_section(raw.get("discord", {}) or {})
 
+    # 4. Inject secrets that use non-standard env-var names
     # Token: DISCORD_BOT_TOKEN takes precedence, fallback to DISCORD_TOKEN
     token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("DISCORD_TOKEN") or ""
-    discord_section["token"] = token
-    sections["discord"] = DiscordConfig(**discord_section)
+    dc: DiscordConfig = sections["discord"]  # type: ignore[assignment]
+    sections["discord"] = DiscordConfig(
+        token=token,
+        guilds=dc.guilds,
+        error_mention_role_id=dc.error_mention_role_id,
+    )
 
     # API key: ANTHROPIC_API_KEY
     api_key = os.environ.get("ANTHROPIC_API_KEY") or ""

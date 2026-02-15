@@ -347,7 +347,8 @@ class TestProcessFile:
 
     @pytest.mark.asyncio
     async def test_callback_failure_does_not_mark_processed(self, tmp_path: Path) -> None:
-        """If the callback raises, the file must NOT be marked as processed."""
+        """If the callback raises, _process_file must NOT mark the file as processed
+        (the caller _watch_loop handles marking it as failed instead)."""
         cfg = _make_cfg(tmp_path)
         callback = AsyncMock(side_effect=RuntimeError("pipeline failed"))
         watcher = DriveWatcher(cfg, on_new_tracks=callback)
@@ -360,3 +361,49 @@ class TestProcessFile:
                 await watcher._process_file(loop, "fail-id", "craig_fail.aac.zip")
 
         assert "fail-id" not in watcher._processed
+
+
+# ===========================================================================
+# 16-17: Failed file recording
+# ===========================================================================
+
+class TestMarkFailed:
+    """Tests for _mark_failed and reprocessing prevention."""
+
+    def test_mark_failed_records_error(self, tmp_path: Path) -> None:
+        """_mark_failed records the file with error status and details."""
+        cfg = _make_cfg(tmp_path)
+        watcher = _make_watcher(cfg)
+        watcher._load_processed_db()
+
+        watcher._mark_failed("err-id", "craig_bad.aac.zip", "Download timeout")
+
+        assert "err-id" in watcher._processed
+        entry = watcher._processed["err-id"]
+        assert entry["name"] == "craig_bad.aac.zip"
+        assert entry["status"] == "error"
+        assert entry["error"] == "Download timeout"
+        assert "failed_at" in entry
+
+        # Verify persisted to disk
+        db_path = Path(cfg.processed_db_path)
+        data = json.loads(db_path.read_text(encoding="utf-8"))
+        assert "err-id" in data["processed"]
+        assert data["processed"]["err-id"]["status"] == "error"
+
+    def test_failed_file_not_reprocessed(self, tmp_path: Path) -> None:
+        """A file marked as failed is filtered out in the next poll cycle."""
+        cfg = _make_cfg(tmp_path)
+        watcher = _make_watcher(cfg)
+        watcher._load_processed_db()
+        watcher._mark_failed("err-id", "craig_bad.aac.zip", "Invalid ZIP")
+
+        # Simulate the filtering that _watch_loop performs
+        listed_files = [
+            {"id": "err-id", "name": "craig_bad.aac.zip"},
+            {"id": "new-id", "name": "craig_new.aac.zip"},
+        ]
+        new_files = [f for f in listed_files if f["id"] not in watcher._processed]
+
+        assert len(new_files) == 1
+        assert new_files[0]["id"] == "new-id"

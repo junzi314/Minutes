@@ -66,8 +66,8 @@ async def run_pipeline_from_tracks(
                 f"文字起こし中... ({len(tracks)}人: {', '.join(speaker_names)})",
             )
 
-            # Stage 2: Transcribe
-            segments = _stage_transcribe(transcriber, tracks)
+            # Stage 2: Transcribe (runs in thread to keep event loop free)
+            segments = await _stage_transcribe(transcriber, tracks)
 
             # Stage 3: Merge transcript
             transcript = merge_transcripts(segments, cfg.merger)
@@ -283,18 +283,18 @@ async def _stage_download(
     return tracks
 
 
-def _stage_transcribe(
+async def _stage_transcribe(
     transcriber: Transcriber,
     tracks: list[SpeakerAudio],
 ) -> list[Segment]:
-    """Stage 2: Transcribe all audio tracks."""
+    """Stage 2: Transcribe all audio tracks (runs in a thread to avoid blocking the event loop)."""
     t0 = time.monotonic()
     logger.info("[transcribe] Starting for %d tracks", len(tracks))
 
     if not transcriber.is_loaded:
         raise TranscriptionError("Whisper model not loaded")
 
-    segments = transcriber.transcribe_all(tracks)
+    segments = await asyncio.to_thread(transcriber.transcribe_all, tracks)
 
     elapsed = time.monotonic() - t0
     logger.info(
