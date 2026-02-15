@@ -141,9 +141,25 @@ class DriveWatcher:
         """Record a file as successfully processed and save to disk."""
         self._processed[file_id] = {
             "name": file_name,
+            "status": "success",
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save_processed_db()
+
+    def _mark_failed(self, file_id: str, file_name: str, error: str) -> None:
+        """Record a file as failed to prevent reprocessing loops."""
+        self._processed[file_id] = {
+            "name": file_name,
+            "status": "error",
+            "error": error,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save_processed_db()
+        logger.info(
+            "Marked file %s (%s) as failed to prevent reprocessing",
+            file_name,
+            file_id,
+        )
 
     # ------------------------------------------------------------------
     # Google Drive API (synchronous — run in executor)
@@ -363,6 +379,7 @@ class DriveWatcher:
                             file_id,
                             exc,
                         )
+                        self._mark_failed(file_id, file_name, str(exc))
                     except Exception as exc:
                         logger.exception(
                             "Unexpected error processing Drive file %s (%s): %s",
@@ -370,6 +387,7 @@ class DriveWatcher:
                             file_id,
                             exc,
                         )
+                        self._mark_failed(file_id, file_name, str(exc))
 
             except asyncio.CancelledError:
                 logger.info("DriveWatcher loop cancelled")

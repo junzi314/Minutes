@@ -19,6 +19,7 @@ from src.config import (
     DiscordConfig,
     GeneratorConfig,
     GoogleDriveConfig,
+    GuildConfig,
     LoggingConfig,
     MergerConfig,
     PipelineConfig,
@@ -45,9 +46,7 @@ def _make_config() -> Config:
     return Config(
         discord=DiscordConfig(
             token="test-token",
-            guild_id=1,
-            watch_channel_id=2,
-            output_channel_id=3,
+            guilds=(GuildConfig(guild_id=1, watch_channel_id=2, output_channel_id=3),),
             error_mention_role_id=999,
         ),
         craig=CraigConfig(),
