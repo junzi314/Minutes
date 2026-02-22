@@ -76,9 +76,14 @@ ANTHROPIC_API_KEY=sk-ant-your_key
 
 ```yaml
 discord:
-  guild_id:         # サーバーID
-  watch_channel_id:  # Craig投稿チャンネルID
-  output_channel_id:  # 議事録の投稿先チャンネルID
+  guilds:
+    - guild_id: 123456789          # サーバーID
+      watch_channel_id: 234567890  # Craig投稿チャンネルID
+      output_channel_id: 345678901 # 議事録の投稿先チャンネルID
+    # 複数サーバーに対応（追加する場合）
+    # - guild_id: 999999999
+    #   watch_channel_id: 888888888
+    #   output_channel_id: 777777777
 
 whisper:
   model: large-v3
@@ -86,16 +91,18 @@ whisper:
   compute_type: float16
   language: ja
 
-claude:
+generator:
   model: claude-sonnet-4-5-20250929
   max_tokens: 4096
 
 google_drive:
   enabled: true
   folder_id: YOUR_CRAIG_FOLDER_ID
-  poll_interval: 30
-  credentials_file: credentials.json
+  poll_interval_sec: 30
+  credentials_path: credentials.json
 ```
+
+`output_channel_id` には **TextChannel** または **ForumChannel** のIDを指定できる。ForumChannelの場合、議事録は新しいスレッドとして投稿される（スレッドタイトル: `会議議事録 — {日時}`）。
 
 Discord IDは、Discordの設定 → 詳細設定 → 開発者モードON にした後、サーバーやチャンネルを右クリック → 「IDをコピー」で取得できる。
 
@@ -154,6 +161,8 @@ Botは2つのものを投稿する:
 - **Embed** — 会議タイトル・参加者・要約（プレビュー用）
 - **Markdownファイル** — 議題・詳細・決定事項・アクションアイテム（完全版）
 
+投稿先がForumChannelの場合、会議ごとにスレッドが作成される。TextChannelの場合は通常のメッセージとして投稿される。
+
 出力例:
 
 ```markdown
@@ -198,6 +207,8 @@ Botは2つのものを投稿する:
 discord-minutes-bot/
 ├── bot.py                     # エントリポイント
 ├── start.sh                   # 起動スクリプト
+├── Dockerfile                 # GPU対応Dockerイメージ
+├── docker-compose.yml         # Docker Compose設定
 ├── src/
 │   ├── pipeline.py            # パイプライン制御
 │   ├── craig_client.py        # Craig API クライアント
@@ -210,18 +221,32 @@ discord-minutes-bot/
 │   └── errors.py              # 例外定義
 ├── prompts/
 │   └── minutes.txt            # 議事録生成プロンプト
-├── tests/                     # テスト (110件)
+├── tests/                     # テスト (139件)
 ├── config.yaml
 ├── credentials.json           # Google Drive サービスアカウントキー
 ├── .env                       # シークレット
 └── requirements.txt
 ```
 
+## Docker
+
+GPU対応のDockerコンテナで起動できる。
+
+```bash
+docker compose up -d
+```
+
+NVIDIA Container Toolkitが必要。`docker-compose.yml` でGPUリソースとボリュームマウントを設定済み。
+
 ## Craig API
 
 Craig APIは非公式。ブラウザのDevToolsで調査して特定したエンドポイントを使用している。
 
 ```
+# Cookジョブ開始
+POST https://craig.horse/api/v1/recordings/{rec_id}/job?key={key}
+Body: {"type":"recording","format":"aac","container":"zip","dynaudnorm":false}
+
 # ジョブステータス（ポーリング）
 GET https://craig.horse/api/v1/recordings/{rec_id}/job?key={key}
 
@@ -240,7 +265,7 @@ pytest
 ```
 
 ```
-========================= 110 passed in 12.3s =========================
+========================= 139 passed in 30s =========================
 ```
 
 ## パフォーマンス
