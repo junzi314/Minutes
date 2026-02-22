@@ -15,6 +15,9 @@ from src.errors import PostingError
 
 logger = logging.getLogger(__name__)
 
+# Type alias for channels that support minutes posting
+OutputChannel = discord.TextChannel | discord.ForumChannel
+
 # Max retry attempts for Discord API calls
 _MAX_RETRIES = 3
 
@@ -168,7 +171,7 @@ async def _send_with_retry(coro_factory, description: str) -> discord.Message:
 
 
 async def post_minutes(
-    channel: discord.TextChannel,
+    channel: OutputChannel,
     minutes_md: str,
     date: str,
     speakers: str,
@@ -176,11 +179,35 @@ async def post_minutes(
 ) -> discord.Message:
     """Post minutes embed + markdown file to the channel.
 
+    For ForumChannel, creates a new thread with the minutes title.
+    For TextChannel, sends a message directly.
     Retries on Discord rate limits. Returns the sent message.
     """
     embed = build_minutes_embed(minutes_md, date, speakers, cfg)
 
     mention_text = " ".join(f"<@{uid}>" for uid in cfg.mention_user_ids) or None
+
+    if isinstance(channel, discord.ForumChannel):
+        thread_title = _truncate(f"会議議事録 — {date}", 100)
+
+        async def _send():
+            file = build_minutes_file(minutes_md, date)
+            result = await channel.create_thread(
+                name=thread_title,
+                content=mention_text,
+                embed=embed,
+                file=file,
+            )
+            return result.message
+
+        message = await _send_with_retry(_send, "Post minutes (forum thread)")
+        logger.info(
+            "Minutes posted to forum #%s as thread '%s' (message_id=%d)",
+            channel.name,
+            thread_title,
+            message.id,
+        )
+        return message
 
     async def _send():
         # Recreate File each attempt (discord.py closes the buffer after send)
@@ -197,13 +224,38 @@ async def post_minutes(
 
 
 async def post_error(
-    channel: discord.TextChannel,
+    channel: OutputChannel,
     error_message: str,
     stage: str,
     error_mention_role_id: int | None = None,
 ) -> discord.Message:
-    """Post an error embed to the channel with optional admin mention."""
+    """Post an error embed to the channel with optional admin mention.
+
+    For ForumChannel, creates a new thread for the error.
+    """
     embed, mention = build_error_embed(error_message, stage, error_mention_role_id)
+
+    if isinstance(channel, discord.ForumChannel):
+        async def _send():
+            result = await channel.create_thread(
+                name=_truncate(f"議事録生成エラー — {stage}", 100),
+                content=mention or None,
+                embed=embed,
+            )
+            return result.message
+
+        try:
+            message = await _send_with_retry(_send, "Post error (forum thread)")
+            logger.info(
+                "Error posted to forum #%s as thread (stage=%s, message_id=%d)",
+                channel.name,
+                stage,
+                message.id,
+            )
+            return message
+        except PostingError:
+            logger.error("Failed to post error thread after retries")
+            raise
 
     async def _send():
         return await channel.send(content=mention or None, embed=embed)
@@ -223,7 +275,7 @@ async def post_error(
 
 
 async def send_status_update(
-    channel: discord.TextChannel,
+    channel: OutputChannel,
     message: discord.Message | None,
     status_text: str,
 ) -> discord.Message | None:
@@ -232,7 +284,13 @@ async def send_status_update(
     If *message* is None, sends a new message. Otherwise edits the existing one.
     Returns the message object, or None if the initial send fails. Failures are
     logged but do not raise -- status messages are non-critical.
+
+    For ForumChannel, status updates are silently skipped since forum channels
+    do not support direct messages (threads are created only for final output).
     """
+    if isinstance(channel, discord.ForumChannel):
+        return None
+
     try:
         if message is None:
             return await channel.send(status_text)

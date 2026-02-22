@@ -13,7 +13,7 @@ discord:
       # Channel ID where Craig Bot posts recording messages
       watch_channel_id: 1044060217882726470
       # Channel ID where meeting minutes will be posted
-      output_channel_id: 1044060217882726470
+      output_channel_id: 1395775686924570655
 
   # Role ID to mention when errors occur (optional, set to null to disable)
   error_mention_role_id: null

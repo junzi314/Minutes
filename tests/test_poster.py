@@ -14,7 +14,9 @@ from src.poster import (
     build_error_embed,
     build_minutes_embed,
     build_minutes_file,
+    post_error,
     post_minutes,
+    send_status_update,
 )
 from src.poster import _SUMMARY_PATTERN, _DECISIONS_PATTERN
 
@@ -184,7 +186,7 @@ class TestPostMinutesMention:
     @pytest.mark.asyncio
     async def test_mention_user_ids_included(self) -> None:
         cfg = PosterConfig(mention_user_ids=(111, 222))
-        channel = MagicMock()
+        channel = MagicMock(spec=discord.TextChannel)
         msg = MagicMock()
         msg.id = 1
         channel.send = AsyncMock(return_value=msg)
@@ -199,7 +201,7 @@ class TestPostMinutesMention:
     @pytest.mark.asyncio
     async def test_no_mention_when_empty(self) -> None:
         cfg = PosterConfig(mention_user_ids=())
-        channel = MagicMock()
+        channel = MagicMock(spec=discord.TextChannel)
         msg = MagicMock()
         msg.id = 1
         channel.send = AsyncMock(return_value=msg)
@@ -209,3 +211,91 @@ class TestPostMinutesMention:
 
         call_kwargs = channel.send.call_args.kwargs
         assert call_kwargs["content"] is None
+
+
+# --- ForumChannel support ---
+
+
+def _make_forum_channel() -> MagicMock:
+    """Create a mock ForumChannel with create_thread returning ThreadWithMessage."""
+    channel = MagicMock(spec=discord.ForumChannel)
+    channel.name = "test-forum"
+
+    msg = MagicMock(spec=discord.Message)
+    msg.id = 42
+
+    # create_thread returns ThreadWithMessage(thread, message)
+    thread_result = MagicMock()
+    thread_result.message = msg
+    channel.create_thread = AsyncMock(return_value=thread_result)
+    return channel
+
+
+class TestPostMinutesForum:
+    @pytest.mark.asyncio
+    async def test_forum_creates_thread(self) -> None:
+        channel = _make_forum_channel()
+
+        result = await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG)
+
+        channel.create_thread.assert_called_once()
+        call_kwargs = channel.create_thread.call_args.kwargs
+        assert call_kwargs["name"] == "会議議事録 — 2026-02-10"
+        assert isinstance(call_kwargs["embed"], discord.Embed)
+        assert call_kwargs["file"] is not None
+        assert result.id == 42
+
+    @pytest.mark.asyncio
+    async def test_forum_thread_includes_mentions(self) -> None:
+        cfg = PosterConfig(mention_user_ids=(111, 222))
+        channel = _make_forum_channel()
+
+        await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", cfg)
+
+        call_kwargs = channel.create_thread.call_args.kwargs
+        assert "<@111>" in call_kwargs["content"]
+        assert "<@222>" in call_kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_forum_no_mention_when_empty(self) -> None:
+        cfg = PosterConfig(mention_user_ids=())
+        channel = _make_forum_channel()
+
+        await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", cfg)
+
+        call_kwargs = channel.create_thread.call_args.kwargs
+        assert call_kwargs["content"] is None
+
+
+class TestPostErrorForum:
+    @pytest.mark.asyncio
+    async def test_forum_creates_error_thread(self) -> None:
+        channel = _make_forum_channel()
+
+        result = await post_error(channel, "Something failed", "transcription")
+
+        channel.create_thread.assert_called_once()
+        call_kwargs = channel.create_thread.call_args.kwargs
+        assert "エラー" in call_kwargs["name"]
+        assert "transcription" in call_kwargs["name"]
+        assert result.id == 42
+
+
+class TestSendStatusUpdateForum:
+    @pytest.mark.asyncio
+    async def test_forum_skips_status_update(self) -> None:
+        channel = MagicMock(spec=discord.ForumChannel)
+        result = await send_status_update(channel, None, "status text")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_text_channel_sends_status(self) -> None:
+        channel = MagicMock(spec=discord.TextChannel)
+        msg = MagicMock(spec=discord.Message)
+        msg.id = 1
+        channel.send = AsyncMock(return_value=msg)
+
+        result = await send_status_update(channel, None, "status text")
+
+        channel.send.assert_called_once_with("status text")
+        assert result is not None

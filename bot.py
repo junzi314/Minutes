@@ -25,6 +25,7 @@ from src.drive_watcher import DriveWatcher
 from src.errors import MinutesBotError
 from src.generator import MinutesGenerator
 from src.pipeline import run_pipeline, run_pipeline_from_tracks
+from src.poster import OutputChannel
 from src.transcriber import Transcriber
 
 logger = logging.getLogger("minutes_bot")
@@ -220,11 +221,17 @@ class MinutesBot(discord.Client):
 
     def _get_output_channel_for_guild(
         self, guild_cfg: GuildConfig | None
-    ) -> discord.TextChannel | None:
-        """Resolve the output channel for a specific guild config."""
+    ) -> OutputChannel | None:
+        """Resolve the output channel for a specific guild config.
+
+        Supports both TextChannel and ForumChannel as output destinations.
+        """
         if guild_cfg is None:
             return None
-        return self.get_channel(guild_cfg.output_channel_id)
+        ch = self.get_channel(guild_cfg.output_channel_id)
+        if isinstance(ch, (discord.TextChannel, discord.ForumChannel)):
+            return ch
+        return None
 
     async def on_raw_message_update(
         self, payload: discord.RawMessageUpdateEvent
@@ -280,7 +287,7 @@ class MinutesBot(discord.Client):
     def _launch_pipeline(
         self,
         recording: DetectedRecording,
-        output_channel: discord.TextChannel,
+        output_channel: OutputChannel,
     ) -> None:
         """Fire-and-forget pipeline task with error logging and dedup guard."""
         pipeline_id = f"craig:{recording.rec_id}"

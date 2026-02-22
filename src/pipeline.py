@@ -28,7 +28,7 @@ from src.detector import DetectedRecording
 from src.errors import MinutesBotError, ProcessingTimeoutError, TranscriptionError
 from src.generator import MinutesGenerator
 from src.merger import merge_transcripts
-from src.poster import post_error, post_minutes, send_status_update
+from src.poster import OutputChannel, post_error, post_minutes, send_status_update
 from src.transcriber import Segment, Transcriber
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ async def run_pipeline_from_tracks(
     cfg: Config,
     transcriber: Transcriber,
     generator: MinutesGenerator,
-    output_channel: discord.TextChannel,
+    output_channel: OutputChannel,
     source_label: str = "unknown",
 ) -> None:
     """Execute stages 2-5 (transcribe -> merge -> generate -> post) on pre-downloaded tracks.
@@ -189,7 +189,7 @@ async def run_pipeline(
     cfg: Config,
     transcriber: Transcriber,
     generator: MinutesGenerator,
-    output_channel: discord.TextChannel,
+    output_channel: OutputChannel,
 ) -> None:
     """Execute the full pipeline from Craig download through Discord posting."""
     status_msg: discord.Message | None = None
