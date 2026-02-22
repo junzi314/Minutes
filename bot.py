@@ -19,12 +19,13 @@ import aiohttp
 import discord
 
 from src.audio_source import SpeakerAudio
-from src.config import Config, load
+from src.config import Config, GuildConfig, load
 from src.detector import DetectedRecording, RECORDING_URL_PATTERN, parse_recording_ended
 from src.drive_watcher import DriveWatcher
 from src.errors import MinutesBotError
 from src.generator import MinutesGenerator
 from src.pipeline import run_pipeline, run_pipeline_from_tracks
+from src.poster import OutputChannel
 from src.transcriber import Transcriber
 
 logger = logging.getLogger("minutes_bot")
@@ -127,6 +128,7 @@ class MinutesBot(discord.Client):
         self.generator = generator
         self.http_session: aiohttp.ClientSession | None = None
         self.drive_watcher: DriveWatcher | None = None
+        self._processing_ids: set[str] = set()
         self._start_time = time.monotonic()
         super().__init__(**kwargs)
         self.tree = discord.app_commands.CommandTree(self)
@@ -148,31 +150,37 @@ class MinutesBot(discord.Client):
     async def on_ready(self) -> None:
         logger.info("Bot connected as %s (id=%d)", self.user, self.user.id)
 
-        guild = discord.Object(id=self.cfg.discord.guild_id)
-        self.tree.copy_global_to(guild=guild)
-        try:
-            await self.tree.sync(guild=guild)
-            logger.info("Slash commands synced to guild %d", self.cfg.discord.guild_id)
-        except discord.Forbidden:
-            logger.warning(
-                "Failed to sync slash commands to guild %d: Missing Access. "
-                "Re-invite the bot with the 'applications.commands' OAuth2 scope.",
-                self.cfg.discord.guild_id,
+        # Sync slash commands to all configured guilds
+        for gcfg in self.cfg.discord.guilds:
+            guild = discord.Object(id=gcfg.guild_id)
+            self.tree.copy_global_to(guild=guild)
+            try:
+                await self.tree.sync(guild=guild)
+                logger.info("Slash commands synced to guild %d", gcfg.guild_id)
+            except discord.Forbidden:
+                logger.warning(
+                    "Failed to sync slash commands to guild %d: Missing Access. "
+                    "Re-invite the bot with the 'applications.commands' OAuth2 scope.",
+                    gcfg.guild_id,
+                )
+
+        for gcfg in self.cfg.discord.guilds:
+            logger.info(
+                "Watching channel %d in guild %d",
+                gcfg.watch_channel_id,
+                gcfg.guild_id,
             )
 
-        logger.info(
-            "Watching channel %d in guild %d",
-            self.cfg.discord.watch_channel_id,
-            self.cfg.discord.guild_id,
-        )
-
-        # Start Google Drive watcher if enabled
+        # Start Google Drive watcher if enabled (uses first guild's output channel)
         if self.cfg.google_drive.enabled:
-            output_channel = self._get_output_channel()
+            first_guild = self.cfg.discord.guilds[0] if self.cfg.discord.guilds else None
+            output_channel = (
+                self._get_output_channel_for_guild(first_guild)
+                if first_guild else None
+            )
             if output_channel is None:
                 logger.error(
-                    "Output channel %d not found, Drive watcher will not start",
-                    self.cfg.discord.output_channel_id,
+                    "Output channel not found for Drive watcher (first guild), Drive watcher will not start",
                 )
             else:
                 async def _on_drive_tracks(
@@ -180,25 +188,50 @@ class MinutesBot(discord.Client):
                     source_label: str,
                     tmp_dir: Path,
                 ) -> None:
-                    await run_pipeline_from_tracks(
-                        tracks=tracks,
-                        cfg=self.cfg,
-                        transcriber=self.transcriber,
-                        generator=self.generator,
-                        output_channel=output_channel,
-                        source_label=source_label,
-                    )
+                    if source_label in self._processing_ids:
+                        logger.warning(
+                            "Skipping duplicate pipeline for %s (already processing)",
+                            source_label,
+                        )
+                        return
+
+                    self._processing_ids.add(source_label)
+                    try:
+                        await run_pipeline_from_tracks(
+                            tracks=tracks,
+                            cfg=self.cfg,
+                            transcriber=self.transcriber,
+                            generator=self.generator,
+                            output_channel=output_channel,
+                            source_label=source_label,
+                        )
+                    finally:
+                        self._processing_ids.discard(source_label)
 
                 self.drive_watcher = DriveWatcher(
                     cfg=self.cfg.google_drive,
                     on_new_tracks=_on_drive_tracks,
                 )
                 self.drive_watcher.start()
-                logger.info("Google Drive watcher started")
+                logger.info(
+                    "Google Drive watcher started (output to channel %d in guild %d)",
+                    first_guild.output_channel_id,
+                    first_guild.guild_id,
+                )
 
-    def _get_output_channel(self) -> discord.TextChannel | None:
-        """Resolve the output channel from config."""
-        return self.get_channel(self.cfg.discord.output_channel_id)
+    def _get_output_channel_for_guild(
+        self, guild_cfg: GuildConfig | None
+    ) -> OutputChannel | None:
+        """Resolve the output channel for a specific guild config.
+
+        Supports both TextChannel and ForumChannel as output destinations.
+        """
+        if guild_cfg is None:
+            return None
+        ch = self.get_channel(guild_cfg.output_channel_id)
+        if isinstance(ch, (discord.TextChannel, discord.ForumChannel)):
+            return ch
+        return None
 
     async def on_raw_message_update(
         self, payload: discord.RawMessageUpdateEvent
@@ -210,12 +243,17 @@ class MinutesBot(discord.Client):
             guild_id = payload.guild_id or 0
             message_id = payload.message_id
 
+            # Look up guild config for this event's guild
+            guild_cfg = self.cfg.discord.get_guild(guild_id)
+            if guild_cfg is None:
+                return  # Event from unconfigured guild — ignore silently
+
             recording = parse_recording_ended(
                 payload_data=data,
                 channel_id=channel_id,
                 guild_id=guild_id,
                 message_id=message_id,
-                watch_channel_id=self.cfg.discord.watch_channel_id,
+                watch_channel_id=guild_cfg.watch_channel_id,
             )
 
             if recording is None:
@@ -228,11 +266,12 @@ class MinutesBot(discord.Client):
                 recording.guild_id,
             )
 
-            output_channel = self._get_output_channel()
+            output_channel = self._get_output_channel_for_guild(guild_cfg)
             if output_channel is None:
                 logger.error(
-                    "Output channel %d not found, skipping pipeline",
-                    self.cfg.discord.output_channel_id,
+                    "Output channel %d not found for guild %d, skipping pipeline",
+                    guild_cfg.output_channel_id,
+                    guild_cfg.guild_id,
                 )
                 return
 
@@ -248,9 +287,19 @@ class MinutesBot(discord.Client):
     def _launch_pipeline(
         self,
         recording: DetectedRecording,
-        output_channel: discord.TextChannel,
+        output_channel: OutputChannel,
     ) -> None:
-        """Fire-and-forget pipeline task with error logging."""
+        """Fire-and-forget pipeline task with error logging and dedup guard."""
+        pipeline_id = f"craig:{recording.rec_id}"
+
+        if pipeline_id in self._processing_ids:
+            logger.warning(
+                "Skipping duplicate pipeline for %s (already processing)", pipeline_id,
+            )
+            return
+
+        self._processing_ids.add(pipeline_id)
+
         task = asyncio.create_task(
             run_pipeline(
                 recording=recording,
@@ -263,7 +312,9 @@ class MinutesBot(discord.Client):
             name=f"pipeline-{recording.rec_id}",
         )
 
-        def _on_done(t: asyncio.Task, rec_id: str = recording.rec_id) -> None:
+        def _on_done(t: asyncio.Task, pid: str = pipeline_id) -> None:
+            self._processing_ids.discard(pid)
+            rec_id = recording.rec_id
             if t.cancelled():
                 logger.warning("Pipeline cancelled for rec_id=%s", rec_id)
             elif (exc := t.exception()) is not None:
@@ -295,14 +346,19 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
         except Exception:
             gpu_available = False
 
+        guild_cfg = client.cfg.discord.get_guild(interaction.guild_id or 0)
+
         lines = [
             f"**Uptime**: {hours}h {minutes}m {seconds}s",
             f"**Whisper model**: {client.cfg.whisper.model} ({'loaded' if client.transcriber.is_loaded else 'not loaded'})",
             f"**GPU**: {'available' if gpu_available else 'not available'}",
             f"**Generator**: {client.cfg.generator.model} ({'ready' if client.generator.is_loaded else 'not ready'})",
-            f"**Watch channel**: <#{client.cfg.discord.watch_channel_id}>",
-            f"**Output channel**: <#{client.cfg.discord.output_channel_id}>",
         ]
+        if guild_cfg:
+            lines.append(f"**Watch channel**: <#{guild_cfg.watch_channel_id}>")
+            lines.append(f"**Output channel**: <#{guild_cfg.output_channel_id}>")
+        else:
+            lines.append("**Guild**: not configured")
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     @group.command(name="process", description="Process a Craig recording URL")
@@ -332,10 +388,11 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
             craig_domain=domain,
         )
 
-        output_channel = client._get_output_channel()
+        guild_cfg = client.cfg.discord.get_guild(interaction.guild_id or 0)
+        output_channel = client._get_output_channel_for_guild(guild_cfg)
         if output_channel is None:
             await interaction.response.send_message(
-                "Output channel not configured or not found.", ephemeral=True,
+                "Output channel not configured or not found for this guild.", ephemeral=True,
             )
             return
 
