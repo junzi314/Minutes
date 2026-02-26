@@ -224,8 +224,12 @@ def _make_forum_channel() -> MagicMock:
     msg = MagicMock(spec=discord.Message)
     msg.id = 42
 
+    thread = MagicMock(spec=discord.Thread)
+    thread.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
+
     # create_thread returns ThreadWithMessage(thread, message)
     thread_result = MagicMock()
+    thread_result.thread = thread
     thread_result.message = msg
     channel.create_thread = AsyncMock(return_value=thread_result)
     return channel
@@ -242,8 +246,21 @@ class TestPostMinutesForum:
         call_kwargs = channel.create_thread.call_args.kwargs
         assert call_kwargs["name"] == "会議議事録 — 2026-02-10"
         assert isinstance(call_kwargs["embed"], discord.Embed)
-        assert call_kwargs["file"] is not None
+        # embed only in create_thread, no file
+        assert "file" not in call_kwargs
         assert result.id == 42
+
+    @pytest.mark.asyncio
+    async def test_forum_sends_file_in_thread(self) -> None:
+        channel = _make_forum_channel()
+
+        await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG)
+
+        # File sent as follow-up in the thread
+        thread_result = channel.create_thread.return_value
+        thread_result.thread.send.assert_called_once()
+        call_kwargs = thread_result.thread.send.call_args.kwargs
+        assert call_kwargs["file"] is not None
 
     @pytest.mark.asyncio
     async def test_forum_thread_includes_mentions(self) -> None:

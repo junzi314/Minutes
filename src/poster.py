@@ -190,17 +190,28 @@ async def post_minutes(
     if isinstance(channel, discord.ForumChannel):
         thread_title = _truncate(f"会議議事録 — {date}", 100)
 
-        async def _send():
-            file = build_minutes_file(minutes_md, date)
+        # Step 1: Create thread with embed
+        async def _create_thread():
             result = await channel.create_thread(
                 name=thread_title,
                 content=mention_text,
                 embed=embed,
-                file=file,
             )
-            return result.message
+            return result
 
-        message = await _send_with_retry(_send, "Post minutes (forum thread)")
+        thread_result = await _send_with_retry(
+            _create_thread, "Create forum thread"
+        )
+        thread = thread_result.thread
+        message = thread_result.message
+
+        # Step 2: Send markdown file as a follow-up in the same thread
+        async def _send_file():
+            file = build_minutes_file(minutes_md, date)
+            return await thread.send(file=file)
+
+        await _send_with_retry(_send_file, "Post minutes file (forum thread)")
+
         logger.info(
             "Minutes posted to forum #%s as thread '%s' (message_id=%d)",
             channel.name,
