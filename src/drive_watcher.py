@@ -207,7 +207,7 @@ class DriveWatcher:
 
         # Build the Drive API query.
         # For a pattern like "craig_*.aac.zip", we use:
-        #   name contains 'craig_' and name contains '.aac.zip'
+        #   name contains 'craig' and name contains '.aac.zip'
         # Combined with parent folder and mimeType constraints.
         query_parts: list[str] = [
             f"'{self._cfg.folder_id}' in parents",
@@ -216,9 +216,9 @@ class DriveWatcher:
         ]
 
         # Convert glob pattern to Drive API name-contains clauses.
-        # Split on '*' and '?' wildcards, keep non-empty literal segments.
+        # Split on wildcards and character classes, keep non-empty literal segments.
         pattern = self._cfg.file_pattern
-        literal_segments = re.split(r"[*?]+", pattern)
+        literal_segments = re.split(r"[*?]+|\[.*?\]", pattern)
         for segment in literal_segments:
             if segment:
                 query_parts.append(f"name contains '{segment}'")

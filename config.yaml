@@ -102,7 +102,7 @@ google_drive:
   # Google Drive folder ID to monitor (get from folder URL)
   folder_id: "18JpLtd8T_fzGOnHUei6cAO0NWty_qgSD"
   # Filename glob pattern to match Craig ZIP exports
-  file_pattern: "craig_*.aac.zip"
+  file_pattern: "craig[_-]*.aac.zip"
   # Polling interval in seconds
   poll_interval_sec: 30
   # Path to processed files tracking database (JSON)

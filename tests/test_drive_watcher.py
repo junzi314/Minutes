@@ -30,7 +30,7 @@ def _make_cfg(tmp_path: Path, **overrides) -> GoogleDriveConfig:
         credentials_path=str(tmp_path / "creds.json"),
         processed_db_path=str(tmp_path / "processed.json"),
         poll_interval_sec=1,
-        file_pattern="craig_*.aac.zip",
+        file_pattern="craig[_-]*.aac.zip",
     )
     defaults.update(overrides)
     return GoogleDriveConfig(**defaults)
@@ -216,18 +216,19 @@ class TestFilePatternMatching:
     """Tests for fnmatch-based file pattern filtering."""
 
     def test_matching_pattern(self) -> None:
-        """craig_12345.aac.zip matches the default pattern."""
+        """craig_12345.aac.zip and craig-12345.aac.zip match the default pattern."""
         import fnmatch
 
-        pattern = "craig_*.aac.zip"
+        pattern = "craig[_-]*.aac.zip"
         assert fnmatch.fnmatch("craig_12345.aac.zip", pattern) is True
         assert fnmatch.fnmatch("craig_abc_def.aac.zip", pattern) is True
+        assert fnmatch.fnmatch("craig-Q92fATPSYVKt_2026-3-2.aac.zip", pattern) is True
 
     def test_non_matching_pattern(self) -> None:
         """Files that don't match the pattern are rejected."""
         import fnmatch
 
-        pattern = "craig_*.aac.zip"
+        pattern = "craig[_-]*.aac.zip"
         assert fnmatch.fnmatch("random.zip", pattern) is False
         assert fnmatch.fnmatch("craig_12345.flac.zip", pattern) is False
         assert fnmatch.fnmatch("meeting_notes.aac.zip", pattern) is False
