@@ -12,6 +12,7 @@ Two entry points:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import tempfile
 import time
@@ -28,11 +29,16 @@ from src.detector import DetectedRecording
 from src.errors import MinutesBotError, ProcessingTimeoutError, TranscriptionError
 from src.generator import MinutesGenerator
 from src.merger import merge_transcripts
-from src.minutes_cache import MinutesCache
 from src.poster import OutputChannel, post_error, post_minutes, send_status_update
+from src.state_store import StateStore
 from src.transcriber import Segment, Transcriber
 
 logger = logging.getLogger(__name__)
+
+
+def _transcript_hash(transcript: str) -> str:
+    """Compute a deterministic cache key from the transcript text."""
+    return hashlib.sha256(transcript.encode("utf-8")).hexdigest()
 
 
 async def run_pipeline_from_tracks(
@@ -41,6 +47,7 @@ async def run_pipeline_from_tracks(
     transcriber: Transcriber,
     generator: MinutesGenerator,
     output_channel: OutputChannel,
+    state_store: StateStore,
     source_label: str = "unknown",
 ) -> None:
     """Execute stages 2-5 (transcribe -> merge -> generate -> post) on pre-downloaded tracks.
@@ -82,8 +89,8 @@ async def run_pipeline_from_tracks(
             date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             guild_name = output_channel.guild.name if output_channel.guild else ""
 
-            cache = MinutesCache(cfg.pipeline.minutes_cache_path)
-            minutes_md = cache.get(transcript)
+            th = _transcript_hash(transcript)
+            minutes_md = state_store.get_cached_minutes(th)
 
             if minutes_md is None:
                 status_msg = await send_status_update(
@@ -96,7 +103,7 @@ async def run_pipeline_from_tracks(
                     guild_name=guild_name,
                     channel_name=output_channel.name,
                 )
-                cache.put(transcript, minutes_md)
+                state_store.put_cached_minutes(th, minutes_md)
             else:
                 logger.info("Using cached minutes for source=%s", source_label)
 
@@ -196,6 +203,7 @@ async def run_pipeline(
     transcriber: Transcriber,
     generator: MinutesGenerator,
     output_channel: OutputChannel,
+    state_store: StateStore,
 ) -> None:
     """Execute the full pipeline from Craig download through Discord posting."""
     status_msg: discord.Message | None = None
@@ -233,6 +241,7 @@ async def run_pipeline(
                 transcriber=transcriber,
                 generator=generator,
                 output_channel=output_channel,
+                state_store=state_store,
                 source_label=f"craig:{recording.rec_id}",
             )
 

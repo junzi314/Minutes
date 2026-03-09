@@ -12,18 +12,17 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import io
-import json
 import logging
 import re
 import tempfile
 import zipfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from src.audio_source import SpeakerAudio, extract_speaker_zip
 from src.config import GoogleDriveConfig
 from src.errors import DriveWatchError
+from src.state_store import StateStore, extract_rec_id
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ class DriveWatcher:
 
     Usage::
 
-        watcher = DriveWatcher(cfg, on_new_tracks=my_callback)
+        watcher = DriveWatcher(cfg, state_store, on_new_tracks=my_callback)
         watcher.start()   # launches polling task
         ...
         watcher.stop()    # cancels polling task
@@ -51,12 +50,13 @@ class DriveWatcher:
     def __init__(
         self,
         cfg: GoogleDriveConfig,
+        state_store: StateStore,
         on_new_tracks: OnNewTracksCallback,
     ) -> None:
         self._cfg = cfg
+        self._state_store = state_store
         self._on_new_tracks = on_new_tracks
         self._task: asyncio.Task[None] | None = None
-        self._processed: dict[str, dict[str, str]] = {}
         self._service: Any = None  # googleapiclient.discovery.Resource
 
     # ------------------------------------------------------------------
@@ -67,11 +67,6 @@ class DriveWatcher:
     def is_running(self) -> bool:
         """Whether the polling task is currently running."""
         return self._task is not None and not self._task.done()
-
-    @property
-    def processed_count(self) -> int:
-        """Number of files that have been processed."""
-        return len(self._processed)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -98,68 +93,6 @@ class DriveWatcher:
             self._task.cancel()
             logger.info("DriveWatcher polling task cancelled")
         self._task = None
-
-    # ------------------------------------------------------------------
-    # Processed-file database
-    # ------------------------------------------------------------------
-
-    def _load_processed_db(self) -> None:
-        """Load the processed-files JSON database from disk."""
-        db_path = Path(self._cfg.processed_db_path)
-        if db_path.exists():
-            try:
-                data = json.loads(db_path.read_text(encoding="utf-8"))
-                self._processed = data.get("processed", {})
-                logger.info(
-                    "Loaded processed DB: %d entries from %s",
-                    len(self._processed),
-                    db_path,
-                )
-            except (json.JSONDecodeError, OSError) as exc:
-                logger.warning(
-                    "Failed to load processed DB from %s, starting fresh: %s",
-                    db_path,
-                    exc,
-                )
-                self._processed = {}
-        else:
-            self._processed = {}
-            logger.debug("No processed DB found at %s, starting fresh", db_path)
-
-    def _save_processed_db(self) -> None:
-        """Persist the processed-files database to disk."""
-        db_path = Path(self._cfg.processed_db_path)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"processed": self._processed}
-        db_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        logger.debug("Saved processed DB (%d entries) to %s", len(self._processed), db_path)
-
-    def _mark_processed(self, file_id: str, file_name: str) -> None:
-        """Record a file as successfully processed and save to disk."""
-        self._processed[file_id] = {
-            "name": file_name,
-            "status": "success",
-            "processed_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save_processed_db()
-
-    def _mark_failed(self, file_id: str, file_name: str, error: str) -> None:
-        """Record a file as failed to prevent reprocessing loops."""
-        self._processed[file_id] = {
-            "name": file_name,
-            "status": "error",
-            "error": error,
-            "failed_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save_processed_db()
-        logger.info(
-            "Marked file %s (%s) as failed to prevent reprocessing",
-            file_name,
-            file_id,
-        )
 
     # ------------------------------------------------------------------
     # Google Drive API (synchronous — run in executor)
@@ -320,7 +253,7 @@ class DriveWatcher:
 
         Runs as an asyncio task. On each tick:
           1. List files in the configured folder
-          2. Skip already-processed files
+          2. Skip already-processed files (via StateStore)
           3. Download, extract, and invoke the callback for new files
           4. Mark files as processed on success
         """
@@ -344,9 +277,6 @@ class DriveWatcher:
             )
             return
 
-        # Load previously processed files
-        self._load_processed_db()
-
         loop = asyncio.get_running_loop()
 
         while True:
@@ -354,10 +284,12 @@ class DriveWatcher:
                 # List files (synchronous, run in executor)
                 files = await loop.run_in_executor(None, self._list_files_sync)
 
-                # Filter out already-processed files
-                new_files = [
-                    f for f in files if f["id"] not in self._processed
-                ]
+                # Filter out already-known files via StateStore
+                new_files: list[dict[str, str]] = []
+                for f in files:
+                    rec_id = extract_rec_id(f["name"]) or f["id"]
+                    if not self._state_store.is_known(rec_id):
+                        new_files.append(f)
 
                 if new_files:
                     logger.info(
@@ -379,7 +311,6 @@ class DriveWatcher:
                             file_id,
                             exc,
                         )
-                        self._mark_failed(file_id, file_name, str(exc))
                     except Exception as exc:
                         logger.exception(
                             "Unexpected error processing Drive file %s (%s): %s",
@@ -387,7 +318,6 @@ class DriveWatcher:
                             file_id,
                             exc,
                         )
-                        self._mark_failed(file_id, file_name, str(exc))
 
             except asyncio.CancelledError:
                 logger.info("DriveWatcher loop cancelled")
@@ -406,8 +336,20 @@ class DriveWatcher:
         file_name: str,
     ) -> None:
         """Download a single Drive file, extract tracks, and invoke the callback."""
-        logger.info("Processing Drive file: %s (%s)", file_name, file_id)
+        rec_id = extract_rec_id(file_name) or file_id
 
+        if not self._state_store.mark_processing(
+            rec_id, source="drive", source_id=file_id, file_name=file_name
+        ):
+            logger.info(
+                "Skipping %s (%s) -- already known as rec_id=%s",
+                file_name,
+                file_id,
+                rec_id,
+            )
+            return
+
+        logger.info("Processing Drive file: %s (%s) rec_id=%s", file_name, file_id, rec_id)
         # Download (synchronous, run in executor)
         zip_bytes = await loop.run_in_executor(
             None, self._download_file_sync, file_id, file_name
@@ -429,7 +371,7 @@ class DriveWatcher:
                     file_name,
                     file_id,
                 )
-                self._mark_processed(file_id, file_name)
+                self._state_store.mark_success(rec_id)
                 tmp_dir_obj.cleanup()
                 return
 
@@ -448,11 +390,11 @@ class DriveWatcher:
             await self._on_new_tracks(tracks, source_label, tmp_path)
 
             # Mark as processed only after successful callback
-            self._mark_processed(file_id, file_name)
+            self._state_store.mark_success(rec_id)
             logger.info("Successfully processed Drive file: %s", file_name)
 
-        except Exception:
-            # Re-raise so the caller (_watch_loop) can log and continue
+        except Exception as exc:
+            self._state_store.mark_failed(rec_id, str(exc))
             raise
         finally:
             # Clean up temporary directory

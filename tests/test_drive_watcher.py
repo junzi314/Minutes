@@ -16,6 +16,7 @@ from src.config import GoogleDriveConfig
 from src.audio_source import ZIP_FILENAME_PATTERN
 from src.drive_watcher import DriveWatcher
 from src.errors import DriveWatchError
+from src.state_store import StateStore
 
 
 # ---------------------------------------------------------------------------
@@ -28,12 +29,16 @@ def _make_cfg(tmp_path: Path, **overrides) -> GoogleDriveConfig:
         enabled=True,
         folder_id="test-folder",
         credentials_path=str(tmp_path / "creds.json"),
-        processed_db_path=str(tmp_path / "processed.json"),
         poll_interval_sec=1,
         file_pattern="craig[_-]*.aac.zip",
     )
     defaults.update(overrides)
     return GoogleDriveConfig(**defaults)
+
+
+def _make_state_store(tmp_path: Path) -> StateStore:
+    """Create a StateStore in a temp directory."""
+    return StateStore(tmp_path / "state", legacy_db_path=tmp_path / "nonexistent.json")
 
 
 def _make_zip(files: dict[str, bytes]) -> bytes:
@@ -47,100 +52,13 @@ def _make_zip(files: dict[str, bytes]) -> bytes:
 
 def _make_watcher(
     cfg: GoogleDriveConfig,
+    state_store: StateStore,
     callback: AsyncMock | None = None,
 ) -> DriveWatcher:
     """Create a DriveWatcher with a mock callback."""
     if callback is None:
         callback = AsyncMock()
-    return DriveWatcher(cfg, on_new_tracks=callback)
-
-
-# ===========================================================================
-# 1-5: Processed-file database
-# ===========================================================================
-
-class TestProcessedDB:
-    """Tests for _load_processed_db, _save_processed_db, _mark_processed."""
-
-    def test_load_empty_no_file(self, tmp_path: Path) -> None:
-        """No DB file on disk -> starts with an empty dict."""
-        cfg = _make_cfg(tmp_path)
-        watcher = _make_watcher(cfg)
-
-        watcher._load_processed_db()
-
-        assert watcher._processed == {}
-
-    def test_load_existing(self, tmp_path: Path) -> None:
-        """JSON file with entries loads correctly."""
-        cfg = _make_cfg(tmp_path)
-        db_path = Path(cfg.processed_db_path)
-        db_path.write_text(json.dumps({
-            "processed": {
-                "file-1": {"name": "craig_001.aac.zip", "processed_at": "2026-01-01T00:00:00+00:00"},
-                "file-2": {"name": "craig_002.aac.zip", "processed_at": "2026-01-02T00:00:00+00:00"},
-            }
-        }), encoding="utf-8")
-
-        watcher = _make_watcher(cfg)
-        watcher._load_processed_db()
-
-        assert len(watcher._processed) == 2
-        assert "file-1" in watcher._processed
-        assert "file-2" in watcher._processed
-        assert watcher._processed["file-1"]["name"] == "craig_001.aac.zip"
-
-    def test_load_corrupted_falls_back_to_empty(self, tmp_path: Path) -> None:
-        """Invalid JSON falls back to empty dict without raising."""
-        cfg = _make_cfg(tmp_path)
-        db_path = Path(cfg.processed_db_path)
-        db_path.write_text("{this is not valid json!!!", encoding="utf-8")
-
-        watcher = _make_watcher(cfg)
-        watcher._load_processed_db()
-
-        assert watcher._processed == {}
-
-    def test_save_and_reload(self, tmp_path: Path) -> None:
-        """_mark_processed persists to disk; a new instance can reload it."""
-        cfg = _make_cfg(tmp_path)
-
-        watcher1 = _make_watcher(cfg)
-        watcher1._load_processed_db()
-        watcher1._mark_processed("abc-123", "craig_test.aac.zip")
-
-        # Verify file was written
-        db_path = Path(cfg.processed_db_path)
-        assert db_path.exists()
-        data = json.loads(db_path.read_text(encoding="utf-8"))
-        assert "abc-123" in data["processed"]
-
-        # New instance should load the same data
-        watcher2 = _make_watcher(cfg)
-        watcher2._load_processed_db()
-        assert "abc-123" in watcher2._processed
-        assert watcher2._processed["abc-123"]["name"] == "craig_test.aac.zip"
-
-    def test_duplicate_prevention(self, tmp_path: Path) -> None:
-        """A file ID already in the processed dict is not reprocessed.
-
-        This tests the filtering logic used in _watch_loop: files whose id
-        is in self._processed are skipped.
-        """
-        cfg = _make_cfg(tmp_path)
-        watcher = _make_watcher(cfg)
-        watcher._load_processed_db()
-        watcher._mark_processed("already-done", "craig_old.aac.zip")
-
-        # Simulate the filtering that _watch_loop performs
-        listed_files = [
-            {"id": "already-done", "name": "craig_old.aac.zip"},
-            {"id": "brand-new", "name": "craig_new.aac.zip"},
-        ]
-        new_files = [f for f in listed_files if f["id"] not in watcher._processed]
-
-        assert len(new_files) == 1
-        assert new_files[0]["id"] == "brand-new"
+    return DriveWatcher(cfg, state_store, on_new_tracks=callback)
 
 
 # ===========================================================================
@@ -244,7 +162,8 @@ class TestBuildService:
     def test_missing_credentials_raises(self, tmp_path: Path) -> None:
         """_build_service raises DriveWatchError when credentials file does not exist."""
         cfg = _make_cfg(tmp_path, credentials_path=str(tmp_path / "nonexistent.json"))
-        watcher = _make_watcher(cfg)
+        state_store = _make_state_store(tmp_path)
+        watcher = _make_watcher(cfg, state_store)
 
         with pytest.raises(DriveWatchError, match="credentials not found"):
             watcher._build_service()
@@ -261,7 +180,8 @@ class TestWatchLoopEarlyExit:
     async def test_empty_folder_id_exits(self, tmp_path: Path) -> None:
         """Loop returns immediately when folder_id is empty."""
         cfg = _make_cfg(tmp_path, folder_id="")
-        watcher = _make_watcher(cfg)
+        state_store = _make_state_store(tmp_path)
+        watcher = _make_watcher(cfg, state_store)
 
         # _watch_loop should return immediately (no infinite loop)
         await asyncio.wait_for(watcher._watch_loop(), timeout=2.0)
@@ -276,7 +196,8 @@ class TestWatchLoopEarlyExit:
             tmp_path,
             credentials_path=str(tmp_path / "no_such_creds.json"),
         )
-        watcher = _make_watcher(cfg)
+        state_store = _make_state_store(tmp_path)
+        watcher = _make_watcher(cfg, state_store)
 
         await asyncio.wait_for(watcher._watch_loop(), timeout=2.0)
 
@@ -294,8 +215,9 @@ class TestProcessFile:
     async def test_callback_invoked(self, tmp_path: Path) -> None:
         """After download and extraction, callback is called with correct args."""
         cfg = _make_cfg(tmp_path)
+        state_store = _make_state_store(tmp_path)
         callback = AsyncMock()
-        watcher = DriveWatcher(cfg, on_new_tracks=callback)
+        watcher = DriveWatcher(cfg, state_store, on_new_tracks=callback)
 
         zip_bytes = _make_zip({
             "1-alice.aac": b"audio alice",
@@ -304,7 +226,7 @@ class TestProcessFile:
 
         with patch.object(watcher, "_download_file_sync", return_value=zip_bytes):
             loop = asyncio.get_running_loop()
-            await watcher._process_file(loop, "file-id-1", "craig_test.aac.zip")
+            await watcher._process_file(loop, "file-id-1", "craig_testTESTtest_2026.aac.zip")
 
         # Callback must have been called exactly once
         callback.assert_awaited_once()
@@ -319,92 +241,47 @@ class TestProcessFile:
         assert usernames == {"alice", "bob"}
 
         # Verify source label
-        assert source_label == "drive:craig_test.aac.zip"
+        assert source_label == "drive:craig_testTESTtest_2026.aac.zip"
 
         # Verify dest_path is a Path
         assert isinstance(dest_path, Path)
 
     @pytest.mark.asyncio
     async def test_marks_processed_on_success(self, tmp_path: Path) -> None:
-        """After successful callback, the file_id is in the processed dict."""
+        """After successful callback, the rec_id is known in state_store."""
         cfg = _make_cfg(tmp_path)
+        state_store = _make_state_store(tmp_path)
         callback = AsyncMock()
-        watcher = DriveWatcher(cfg, on_new_tracks=callback)
+        watcher = DriveWatcher(cfg, state_store, on_new_tracks=callback)
 
         zip_bytes = _make_zip({"1-alice.aac": b"audio"})
 
         with patch.object(watcher, "_download_file_sync", return_value=zip_bytes):
             loop = asyncio.get_running_loop()
-            await watcher._process_file(loop, "file-xyz", "craig_rec.aac.zip")
+            await watcher._process_file(loop, "file-xyz", "craig_rec123456789_2026.aac.zip")
 
-        assert "file-xyz" in watcher._processed
-        assert watcher._processed["file-xyz"]["name"] == "craig_rec.aac.zip"
-
-        # Also verify it was persisted to disk
-        db_path = Path(cfg.processed_db_path)
-        assert db_path.exists()
-        data = json.loads(db_path.read_text(encoding="utf-8"))
-        assert "file-xyz" in data["processed"]
+        # rec_id extracted from filename
+        assert state_store.is_known("rec123456789")
+        entry = state_store.get_entry("rec123456789")
+        assert entry["status"] == "success"
+        assert entry["source_id"] == "file-xyz"
 
     @pytest.mark.asyncio
-    async def test_callback_failure_does_not_mark_processed(self, tmp_path: Path) -> None:
-        """If the callback raises, _process_file must NOT mark the file as processed
-        (the caller _watch_loop handles marking it as failed instead)."""
+    async def test_callback_failure_marks_failed(self, tmp_path: Path) -> None:
+        """If the callback raises, _process_file marks the rec_id as failed."""
         cfg = _make_cfg(tmp_path)
+        state_store = _make_state_store(tmp_path)
         callback = AsyncMock(side_effect=RuntimeError("pipeline failed"))
-        watcher = DriveWatcher(cfg, on_new_tracks=callback)
+        watcher = DriveWatcher(cfg, state_store, on_new_tracks=callback)
 
         zip_bytes = _make_zip({"1-alice.aac": b"audio"})
 
         with patch.object(watcher, "_download_file_sync", return_value=zip_bytes):
             loop = asyncio.get_running_loop()
             with pytest.raises(RuntimeError, match="pipeline failed"):
-                await watcher._process_file(loop, "fail-id", "craig_fail.aac.zip")
+                await watcher._process_file(loop, "fail-id", "craig_failID123456_2026.aac.zip")
 
-        assert "fail-id" not in watcher._processed
-
-
-# ===========================================================================
-# 16-17: Failed file recording
-# ===========================================================================
-
-class TestMarkFailed:
-    """Tests for _mark_failed and reprocessing prevention."""
-
-    def test_mark_failed_records_error(self, tmp_path: Path) -> None:
-        """_mark_failed records the file with error status and details."""
-        cfg = _make_cfg(tmp_path)
-        watcher = _make_watcher(cfg)
-        watcher._load_processed_db()
-
-        watcher._mark_failed("err-id", "craig_bad.aac.zip", "Download timeout")
-
-        assert "err-id" in watcher._processed
-        entry = watcher._processed["err-id"]
-        assert entry["name"] == "craig_bad.aac.zip"
+        # rec_id should be marked as error
+        assert state_store.is_known("failID123456")
+        entry = state_store.get_entry("failID123456")
         assert entry["status"] == "error"
-        assert entry["error"] == "Download timeout"
-        assert "failed_at" in entry
-
-        # Verify persisted to disk
-        db_path = Path(cfg.processed_db_path)
-        data = json.loads(db_path.read_text(encoding="utf-8"))
-        assert "err-id" in data["processed"]
-        assert data["processed"]["err-id"]["status"] == "error"
-
-    def test_failed_file_not_reprocessed(self, tmp_path: Path) -> None:
-        """A file marked as failed is filtered out in the next poll cycle."""
-        cfg = _make_cfg(tmp_path)
-        watcher = _make_watcher(cfg)
-        watcher._load_processed_db()
-        watcher._mark_failed("err-id", "craig_bad.aac.zip", "Invalid ZIP")
-
-        # Simulate the filtering that _watch_loop performs
-        listed_files = [
-            {"id": "err-id", "name": "craig_bad.aac.zip"},
-            {"id": "new-id", "name": "craig_new.aac.zip"},
-        ]
-        new_files = [f for f in listed_files if f["id"] not in watcher._processed]
-
-        assert len(new_files) == 1
-        assert new_files[0]["id"] == "new-id"

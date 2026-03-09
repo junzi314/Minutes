@@ -34,6 +34,7 @@ from src.errors import (
     TranscriptionError,
 )
 from src.pipeline import run_pipeline
+from src.state_store import StateStore
 from src.transcriber import Segment
 
 
@@ -42,7 +43,7 @@ from src.transcriber import Segment
 # ---------------------------------------------------------------------------
 
 
-def _make_config(cache_path: str = "processed_files.json") -> Config:
+def _make_config() -> Config:
     return Config(
         discord=DiscordConfig(
             token="test-token",
@@ -56,7 +57,7 @@ def _make_config(cache_path: str = "processed_files.json") -> Config:
         poster=PosterConfig(),
         logging=LoggingConfig(),
         google_drive=GoogleDriveConfig(),
-        pipeline=PipelineConfig(minutes_cache_path=cache_path),
+        pipeline=PipelineConfig(),
     )
 
 
@@ -97,8 +98,13 @@ def _make_segments() -> list[Segment]:
 
 
 @pytest.fixture
-def cfg(tmp_path: Path) -> Config:
-    return _make_config(str(tmp_path / "processed_files.json"))
+def cfg() -> Config:
+    return _make_config()
+
+
+@pytest.fixture
+def state_store(tmp_path: Path) -> StateStore:
+    return StateStore(tmp_path / "state", legacy_db_path=tmp_path / "none.json")
 
 
 @pytest.fixture
@@ -167,6 +173,7 @@ class TestPipelineHappyPath:
         mock_channel: MagicMock,
         mock_transcriber: MagicMock,
         mock_generator: MagicMock,
+        state_store: StateStore,
         tmp_path: Path,
     ) -> None:
         tracks = _make_tracks(tmp_path)
@@ -181,6 +188,7 @@ class TestPipelineHappyPath:
                 transcriber=mock_transcriber,
                 generator=mock_generator,
                 output_channel=mock_channel,
+                state_store=state_store,
             )
 
         # Download was called
@@ -211,6 +219,7 @@ class TestPipelineHappyPath:
         mock_channel: MagicMock,
         mock_transcriber: MagicMock,
         mock_generator: MagicMock,
+        state_store: StateStore,
         tmp_path: Path,
     ) -> None:
         tracks = _make_tracks(tmp_path)
@@ -225,6 +234,7 @@ class TestPipelineHappyPath:
                 transcriber=mock_transcriber,
                 generator=mock_generator,
                 output_channel=mock_channel,
+                state_store=state_store,
             )
 
         # Status messages should include Japanese progress text
@@ -248,6 +258,7 @@ class TestPipelineDownloadFailure:
         mock_channel: MagicMock,
         mock_transcriber: MagicMock,
         mock_generator: MagicMock,
+        state_store: StateStore,
     ) -> None:
         with patch("src.pipeline._stage_download", new_callable=AsyncMock) as mock_dl:
             mock_dl.side_effect = AudioAcquisitionError("Download failed")
@@ -260,6 +271,7 @@ class TestPipelineDownloadFailure:
                     transcriber=mock_transcriber,
                     generator=mock_generator,
                     output_channel=mock_channel,
+                    state_store=state_store,
                 )
 
         # Error embed should have been posted
@@ -286,6 +298,7 @@ class TestPipelineTranscriptionFailure:
         mock_channel: MagicMock,
         mock_transcriber: MagicMock,
         mock_generator: MagicMock,
+        state_store: StateStore,
         tmp_path: Path,
     ) -> None:
         tracks = _make_tracks(tmp_path)
@@ -302,6 +315,7 @@ class TestPipelineTranscriptionFailure:
                     transcriber=mock_transcriber,
                     generator=mock_generator,
                     output_channel=mock_channel,
+                    state_store=state_store,
                 )
 
         # Generator should NOT have been called
@@ -318,6 +332,7 @@ class TestPipelineGenerationFailure:
         mock_channel: MagicMock,
         mock_transcriber: MagicMock,
         mock_generator: MagicMock,
+        state_store: StateStore,
         tmp_path: Path,
     ) -> None:
         tracks = _make_tracks(tmp_path)
@@ -334,6 +349,7 @@ class TestPipelineGenerationFailure:
                     transcriber=mock_transcriber,
                     generator=mock_generator,
                     output_channel=mock_channel,
+                    state_store=state_store,
                 )
 
         # Transcriber should have been called
@@ -350,6 +366,7 @@ class TestPipelinePostingFailure:
         mock_channel: MagicMock,
         mock_transcriber: MagicMock,
         mock_generator: MagicMock,
+        state_store: StateStore,
         tmp_path: Path,
     ) -> None:
         tracks = _make_tracks(tmp_path)
@@ -387,6 +404,7 @@ class TestPipelinePostingFailure:
                     transcriber=mock_transcriber,
                     generator=mock_generator,
                     output_channel=mock_channel,
+                    state_store=state_store,
                 )
 
 
@@ -400,6 +418,7 @@ class TestPipelineEmptyTranscript:
         mock_channel: MagicMock,
         mock_transcriber: MagicMock,
         mock_generator: MagicMock,
+        state_store: StateStore,
         tmp_path: Path,
     ) -> None:
         tracks = _make_tracks(tmp_path)
@@ -417,6 +436,7 @@ class TestPipelineEmptyTranscript:
                     transcriber=mock_transcriber,
                     generator=mock_generator,
                     output_channel=mock_channel,
+                    state_store=state_store,
                 )
 
         # Generator should NOT have been called

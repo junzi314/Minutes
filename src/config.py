@@ -104,7 +104,7 @@ class PosterConfig:
 @dataclass(frozen=True)
 class PipelineConfig:
     processing_timeout_sec: int = 3600
-    minutes_cache_path: str = "processed_files.json"
+    state_dir: str = "state"
 
 
 @dataclass(frozen=True)
@@ -122,7 +122,6 @@ class GoogleDriveConfig:
     folder_id: str = ""
     file_pattern: str = "craig[_-]*.aac.zip"
     poll_interval_sec: int = 30
-    processed_db_path: str = "processed_files.json"
 
 
 @dataclass(frozen=True)

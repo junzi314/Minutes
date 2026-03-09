@@ -26,6 +26,7 @@ from src.errors import MinutesBotError
 from src.generator import MinutesGenerator
 from src.pipeline import run_pipeline, run_pipeline_from_tracks
 from src.poster import OutputChannel
+from src.state_store import StateStore
 from src.transcriber import Transcriber
 
 logger = logging.getLogger("minutes_bot")
@@ -121,14 +122,15 @@ class MinutesBot(discord.Client):
         cfg: Config,
         transcriber: Transcriber,
         generator: MinutesGenerator,
+        state_store: StateStore,
         **kwargs: object,
     ) -> None:
         self.cfg = cfg
         self.transcriber = transcriber
         self.generator = generator
+        self.state_store = state_store
         self.http_session: aiohttp.ClientSession | None = None
         self.drive_watcher: DriveWatcher | None = None
-        self._processing_ids: set[str] = set()
         self._start_time = time.monotonic()
         super().__init__(**kwargs)
         self.tree = discord.app_commands.CommandTree(self)
@@ -188,28 +190,19 @@ class MinutesBot(discord.Client):
                     source_label: str,
                     tmp_dir: Path,
                 ) -> None:
-                    if source_label in self._processing_ids:
-                        logger.warning(
-                            "Skipping duplicate pipeline for %s (already processing)",
-                            source_label,
-                        )
-                        return
-
-                    self._processing_ids.add(source_label)
-                    try:
-                        await run_pipeline_from_tracks(
-                            tracks=tracks,
-                            cfg=self.cfg,
-                            transcriber=self.transcriber,
-                            generator=self.generator,
-                            output_channel=output_channel,
-                            source_label=source_label,
-                        )
-                    finally:
-                        self._processing_ids.discard(source_label)
+                    await run_pipeline_from_tracks(
+                        tracks=tracks,
+                        cfg=self.cfg,
+                        transcriber=self.transcriber,
+                        generator=self.generator,
+                        output_channel=output_channel,
+                        state_store=self.state_store,
+                        source_label=source_label,
+                    )
 
                 self.drive_watcher = DriveWatcher(
                     cfg=self.cfg.google_drive,
+                    state_store=self.state_store,
                     on_new_tracks=_on_drive_tracks,
                 )
                 self.drive_watcher.start()
@@ -290,15 +283,15 @@ class MinutesBot(discord.Client):
         output_channel: OutputChannel,
     ) -> None:
         """Fire-and-forget pipeline task with error logging and dedup guard."""
-        pipeline_id = f"craig:{recording.rec_id}"
+        rec_id = recording.rec_id
 
-        if pipeline_id in self._processing_ids:
+        if not self.state_store.mark_processing(
+            rec_id, source="craig", source_id=rec_id, file_name=""
+        ):
             logger.warning(
-                "Skipping duplicate pipeline for %s (already processing)", pipeline_id,
+                "Skipping duplicate pipeline for rec_id=%s (already known)", rec_id,
             )
             return
-
-        self._processing_ids.add(pipeline_id)
 
         task = asyncio.create_task(
             run_pipeline(
@@ -308,19 +301,21 @@ class MinutesBot(discord.Client):
                 transcriber=self.transcriber,
                 generator=self.generator,
                 output_channel=output_channel,
+                state_store=self.state_store,
             ),
-            name=f"pipeline-{recording.rec_id}",
+            name=f"pipeline-{rec_id}",
         )
 
-        def _on_done(t: asyncio.Task, pid: str = pipeline_id) -> None:
-            self._processing_ids.discard(pid)
-            rec_id = recording.rec_id
+        def _on_done(t: asyncio.Task, rid: str = rec_id) -> None:
             if t.cancelled():
-                logger.warning("Pipeline cancelled for rec_id=%s", rec_id)
+                self.state_store.mark_failed(rid, "Pipeline cancelled")
+                logger.warning("Pipeline cancelled for rec_id=%s", rid)
             elif (exc := t.exception()) is not None:
-                logger.exception("Pipeline failed for rec_id=%s", rec_id, exc_info=exc)
+                self.state_store.mark_failed(rid, str(exc))
+                logger.exception("Pipeline failed for rec_id=%s", rid, exc_info=exc)
             else:
-                logger.info("Pipeline completed successfully for rec_id=%s", rec_id)
+                self.state_store.mark_success(rid)
+                logger.info("Pipeline completed successfully for rec_id=%s", rid)
 
         task.add_done_callback(_on_done)
 
@@ -402,6 +397,12 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
             )
             return
 
+        if client.state_store.is_known(rec_id):
+            await interaction.response.send_message(
+                f"Recording `{rec_id}` has already been processed.", ephemeral=True,
+            )
+            return
+
         await interaction.response.send_message(
             f"Processing recording `{rec_id}`... Results will be posted to <#{output_channel.id}>.",
             ephemeral=True,
@@ -421,7 +422,7 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
             return
 
         running = watcher is not None and watcher.is_running
-        processed_count = watcher.processed_count if watcher else 0
+        processed_count = client.state_store.processing_count
 
         lines = [
             f"**Drive watcher**: {'running' if running else 'stopped'}",
@@ -466,6 +467,13 @@ def main() -> None:
 
     logger.info("Starting Discord Minutes Bot")
 
+    # Initialize unified state store
+    state_store = StateStore(Path(cfg.pipeline.state_dir))
+    stale_count = state_store.cleanup_stale()
+    if stale_count:
+        logger.info("Cleaned up %d stale processing entries", stale_count)
+    logger.info("StateStore ready (%d entries)", state_store.processing_count)
+
     # Preload Whisper model (keeps it resident in VRAM)
     transcriber = Transcriber(cfg.whisper)
     transcriber.load_model()
@@ -484,6 +492,7 @@ def main() -> None:
         cfg=cfg,
         transcriber=transcriber,
         generator=generator,
+        state_store=state_store,
         intents=intents,
     )
 
