@@ -127,15 +127,52 @@ class DriveWatcher:
             logger.debug("No processed DB found at %s, starting fresh", db_path)
 
     def _save_processed_db(self) -> None:
-        """Persist the processed-files database to disk."""
+        """Persist the processed-files database to disk.
+
+        Uses read-modify-write to preserve other sections (e.g. minutes_cache)
+        and retries on transient PermissionError (common on WSL2).
+        """
         db_path = Path(self._cfg.processed_db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"processed": self._processed}
-        db_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        logger.debug("Saved processed DB (%d entries) to %s", len(self._processed), db_path)
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Read existing data to preserve other sections (e.g. minutes_cache)
+                existing: dict = {}
+                if db_path.exists():
+                    try:
+                        existing = json.loads(db_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        existing = {}
+
+                existing["processed"] = self._processed
+                db_path.write_text(
+                    json.dumps(existing, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                logger.debug(
+                    "Saved processed DB (%d entries) to %s",
+                    len(self._processed),
+                    db_path,
+                )
+                return
+            except PermissionError:
+                if attempt < max_retries:
+                    logger.warning(
+                        "PermissionError writing processed DB (attempt %d/%d), retrying...",
+                        attempt,
+                        max_retries,
+                    )
+                    import time
+                    time.sleep(0.5)
+                else:
+                    logger.error(
+                        "Failed to save processed DB after %d attempts (PermissionError). "
+                        "In-memory state is up to date; will retry on next mark.",
+                        max_retries,
+                    )
+                    # Don't raise — the in-memory dict is already updated
 
     def _mark_processed(self, file_id: str, file_name: str) -> None:
         """Record a file as successfully processed and save to disk."""
@@ -147,7 +184,11 @@ class DriveWatcher:
         self._save_processed_db()
 
     def _mark_failed(self, file_id: str, file_name: str, error: str) -> None:
-        """Record a file as failed to prevent reprocessing loops."""
+        """Record a file as failed to prevent reprocessing loops.
+
+        Never raises — the in-memory dict is always updated even if disk
+        write fails, so the file won't be reprocessed in the same session.
+        """
         self._processed[file_id] = {
             "name": file_name,
             "status": "error",
@@ -407,6 +448,14 @@ class DriveWatcher:
     ) -> None:
         """Download a single Drive file, extract tracks, and invoke the callback."""
         logger.info("Processing Drive file: %s (%s)", file_name, file_id)
+
+        # Mark as "processing" in memory BEFORE starting, so the file won't
+        # be picked up again even if disk save fails later.
+        self._processed[file_id] = {
+            "name": file_name,
+            "status": "processing",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
 
         # Download (synchronous, run in executor)
         zip_bytes = await loop.run_in_executor(

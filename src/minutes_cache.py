@@ -40,10 +40,23 @@ class MinutesCache:
 
     def _save(self, data: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                self._path.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                return
+            except PermissionError:
+                if attempt < max_retries:
+                    import time
+                    time.sleep(0.5)
+                else:
+                    logger.warning(
+                        "Failed to save minutes cache after %d attempts (PermissionError)",
+                        max_retries,
+                    )
 
     def get(self, transcript: str) -> str | None:
         """Return cached minutes markdown, or None on cache miss."""

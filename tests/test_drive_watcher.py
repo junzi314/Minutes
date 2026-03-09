@@ -347,9 +347,13 @@ class TestProcessFile:
         assert "file-xyz" in data["processed"]
 
     @pytest.mark.asyncio
-    async def test_callback_failure_does_not_mark_processed(self, tmp_path: Path) -> None:
-        """If the callback raises, _process_file must NOT mark the file as processed
-        (the caller _watch_loop handles marking it as failed instead)."""
+    async def test_callback_failure_does_not_mark_success(self, tmp_path: Path) -> None:
+        """If the callback raises, _process_file must NOT mark the file as 'success'.
+
+        The file IS in _processed with 'processing' status (set before the callback
+        to prevent same-session reprocessing), but the caller _watch_loop handles
+        updating the status to 'error' via _mark_failed.
+        """
         cfg = _make_cfg(tmp_path)
         callback = AsyncMock(side_effect=RuntimeError("pipeline failed"))
         watcher = DriveWatcher(cfg, on_new_tracks=callback)
@@ -361,7 +365,10 @@ class TestProcessFile:
             with pytest.raises(RuntimeError, match="pipeline failed"):
                 await watcher._process_file(loop, "fail-id", "craig_fail.aac.zip")
 
-        assert "fail-id" not in watcher._processed
+        # File is in _processed (marked as "processing" before callback),
+        # but NOT marked as "success"
+        assert "fail-id" in watcher._processed
+        assert watcher._processed["fail-id"]["status"] == "processing"
 
 
 # ===========================================================================
