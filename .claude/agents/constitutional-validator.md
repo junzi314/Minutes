@@ -1,6 +1,6 @@
 ---
 name: constitutional-validator
-description: Validates roadmap items, features, and technical decisions against the project's constitution, principles, and core values. Ensures all proposals align with the mission, established methodology, and design principles before implementation proceeds.
+description: Validates roadmap items, features, and technical decisions against the Discord Minutes Bot's principles and core values. Ensures all proposals align with the mission (automated meeting minutes from voice recordings), established methodology, and design principles before implementation proceeds.
 model: opus
 color: purple
 ---
@@ -36,16 +36,17 @@ Every roadmap item must serve the core mission:
 Validate against established architectural decisions:
 
 **Architectural Principles**:
-- Modular component architecture
-- API-first design
-- Cloud-native patterns
-- Event-driven architecture
+- 6-stage async pipeline (audio → transcription → merging → generation → posting)
+- Modular `src/` layout with single-responsibility modules
+- Event-driven Discord bot (message/voice events trigger pipeline)
+- GPU-accelerated ML inference (faster-whisper on CUDA)
 
 **Red Flags**:
-- Adding monolithic components
-- Breaking API-first design
-- Creating unnecessary vendor lock-in
-- Violating established patterns
+- Breaking the pipeline stage isolation
+- Adding synchronous blocking code in async context
+- Creating unnecessary external service dependencies
+- Bypassing the state store deduplication mechanism
+- Introducing RDBMS when JSON state files suffice
 
 ### **3. Knowledge Management Principles**
 
@@ -257,11 +258,11 @@ If approved (with or without conditions):
 Quick reference for key principles:
 
 **Design Principles**:
-1. Context-Aware by Default
-2. Learning Organization
-3. Autonomous but Collaborative
-4. Multi-Tenant by Design
-5. API-First Architecture
+1. Pipeline-First: All processing flows through the 6-stage pipeline
+2. Async by Default: discord.py async patterns throughout
+3. Graceful Degradation: Each stage handles failures independently
+4. Multi-Guild Support: Config-driven per-guild settings
+5. Minimal State: JSON file store, no heavy persistence layer
 
 **Systematic Methodology**:
 1. Evidence-Based Risk Reduction
@@ -269,10 +270,10 @@ Quick reference for key principles:
 3. Query-Driven De-Risking
 4. Recipe-Based Problem Solving
 
-**AI-First Development**:
-1. Human-AI Collaboration Model
-2. Institutional Intelligence Integration
-3. Speed and Quality Balance
+**AI-Assisted Processing**:
+1. Whisper for transcription (local GPU inference)
+2. Claude API for structured minutes generation
+3. Human review via Discord channel posting
 
 ## **Quality Standards**
 

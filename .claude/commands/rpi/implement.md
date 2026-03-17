@@ -21,7 +21,7 @@ This command executes phased implementation of features based on planning docume
 
 **Output Location**: `rpi/{feature-slug}/implement/`
 
-**This is Step 4 of the RPI Workflow** (final step - actual implementation).
+**This is Step 5 (Implement) of the RPI Workflow** (final step - after Step 4: Validate).
 
 ## Flags
 
@@ -46,7 +46,7 @@ All agents use **Opus model** for maximum quality.
 | `Explore` | Built-in | Pre-implementation code exploration |
 | `code-reviewer` | Custom | Code review and quality validation |
 | `constitutional-validator` | Custom | Validate against project constitution |
-| `documentation-analyst-writer` | Built-in | Documentation generation |
+| `documentation-analyst-writer` | Custom | Documentation generation |
 
 ### Agent Routing
 
@@ -241,23 +241,23 @@ Implement all deliverables and report what was done.
 3. Run tests relevant to changes
 4. Verify build succeeds
 
-**Validation Commands** (adjust to your project):
+**Validation Commands**:
 
 ```bash
 # Run linter
-[your-linter-command]
+npm run lint
 
-# Run tests
-[your-test-command]
+# Run tests (when configured)
+# npm test
 
-# Build/compile
-[your-build-command]
+# Build (includes prisma generate)
+npm run build
 ```
 
 **Self-Validation Checklist**:
 - [ ] All deliverables implemented
 - [ ] Linting passes
-- [ ] Tests pass
+- [ ] Tests pass (skip if test suite not yet configured)
 - [ ] Build succeeds
 - [ ] No regressions in existing tests
 - [ ] Constitutional constraints honored
@@ -511,9 +511,8 @@ On successful completion of all phases:
 ### Next Steps
 1. Create PR with changes
 2. Request final human review
-3. Deploy to staging
-4. Verify in staging environment
-5. Deploy to production
+3. Verify on Vercel preview deployment (auto-created for PR)
+4. Merge PR to deploy to production
 
 ### PR Notes
 
@@ -590,7 +589,7 @@ Before marking implementation complete:
 
 ### Part of RPI Workflow
 
-Step 4 of 4 (Describe → Research → Plan → **Implement**)
+Step 5 of 6 (Decompose → Describe → Research → Plan → Validate → **Implement**)
 
 ---
 

@@ -30,7 +30,7 @@ This command performs comprehensive research and analysis of feature requests **
 
 **Output Location**: `rpi/{feature-slug}/research/RESEARCH.md`
 
-**This is Step 2 of the RPI Workflow** (after initial feature description in Step 1).
+**This is Step 2 (Research) of the RPI Workflow** (after Step 1: Describe).
 
 ## Outline
 
@@ -242,7 +242,7 @@ This command performs comprehensive research and analysis of feature requests **
 
 **Prerequisites**: Phases 1-4 complete
 
-**Agent**: documentation-analyst-writer (via Task tool)
+**Agent**: documentation-analyst-writer
 
 **Process**:
 1. **Launch documentation-analyst-writer agent** with all phase outputs
@@ -275,7 +275,18 @@ This command orchestrates 6 specialist agents:
 | Phase 2.5 | Explore | Built-in | Task tool with subagent_type="Explore" |
 | Phase 3 | senior-software-engineer | Custom | .claude/agents/senior-software-engineer.md |
 | Phase 4 | technical-cto-advisor | Custom | .claude/agents/technical-cto-advisor.md |
-| Phase 5 | documentation-analyst-writer | Built-in | Task tool with subagent_type="documentation-analyst-writer" |
+| Phase 5 | documentation-analyst-writer | Custom | .claude/agents/documentation-analyst-writer.md |
+
+### Agent Invocation
+
+**Custom Agents** (requirement-parser, product-manager, senior-software-engineer, technical-cto-advisor, documentation-analyst-writer):
+- Claude Code automatically detects these from `.claude/agents/`
+- Reference them naturally: "Acting as the requirement-parser agent..."
+- NO Task tool invocation needed
+
+**Built-in Agents** (Explore):
+- Launch via Task tool with `subagent_type="Explore"`
+- Provide detailed prompt with specific investigation targets
 
 ---
 
@@ -364,7 +375,7 @@ Based on the **[GO/NO-GO]** recommendation:
 
 - **When to Use**: After Step 1 (Describe) creates the feature folder
 - **Critical Gate**: This prevents wasted effort on non-viable features
-- **Part of RPI Workflow**: Step 2 of 4 (Describe → Research → Plan → Implement)
+- **Part of RPI Workflow**: Step 2 of 6 (Decompose → Describe → **Research** → Plan → Validate → Implement)
 
 ---
 

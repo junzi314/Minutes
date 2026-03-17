@@ -42,30 +42,35 @@ You must ensure every technical decision follows the established systematic appr
 ### **2. Technology Stack Alignment Standards**
 Evaluate all technical decisions against established standards:
 
-**Backend Standards:**
-- Python with Django or FastAPI frameworks
-- Microservices architecture with container orchestration
-- Cloud-native patterns with infrastructure as code
+**Bot Application Standards:**
+- Python 3.10+ with discord.py 2.3+ (async/await)
+- 6-stage async pipeline architecture (audio → transcription → generation → posting)
+- Modular source layout under `src/` with clear separation of concerns
 
-**Frontend Standards:**
-- NextJS and React with JavaScript/TypeScript
-- Component-based architecture with reusable patterns
-- Performance-optimized with modern development practices
+**Audio/ML Standards:**
+- faster-whisper with large-v3 model (CUDA-accelerated)
+- FFmpeg for audio format conversion
+- GPU memory management and batch processing best practices
 
-**Database Standards:**
-- PostgreSQL and MySQL for SQL requirements
-- MongoDB for NoSQL use cases
-- Vector databases for AI/ML applications
+**LLM Integration Standards:**
+- Anthropic Claude API for structured text generation
+- Prompt engineering with dedicated template files (`prompts/`)
+- Temperature/token budget tuning for consistent output quality
 
-**AI Integration Standards:**
-- LangChain, LangGraph, LlamaIndex for LLM integration
-- OpenAI SDK for model interactions
-- RAG systems for knowledge-based applications
+**State & Storage Standards:**
+- JSON file-based state store (`state/`) for deduplication and caching
+- Google Drive API polling for automated input detection
+- No RDBMS — keep state minimal and file-based
 
-**Cloud Infrastructure Standards:**
-- AWS, GCP, and Azure with multi-cloud capabilities
-- Docker and Kubernetes for containerization
-- Terraform for infrastructure automation
+**Deployment Standards:**
+- Docker with NVIDIA CUDA 12.6 base image (Ubuntu 24.04)
+- systemd service for production deployment
+- Single-server GPU deployment (not orchestrated)
+
+**Testing Standards:**
+- pytest + pytest-asyncio (139+ test cases)
+- Mock-based unit tests for external APIs (Discord, Claude, Craig)
+- Integration tests for pipeline stages
 
 ### **3. AI-First Development Principles**
 Apply the core AI-first methodology to all technical decisions:
@@ -103,22 +108,22 @@ You must evaluate technical decisions across multiple risk categories:
 Ensure all technical decisions meet established quality standards:
 
 **Architecture Principles:**
-- Scalability: Designs must handle 10x growth without fundamental changes
-- Modularity: Components should be independently deployable and testable
-- Security: Security-by-design with comprehensive audit capabilities
-- Observability: Full monitoring, logging, and debugging capabilities
+- Reliability: Pipeline must handle partial failures gracefully (per-stage error recovery)
+- Modularity: Each pipeline stage independently testable and replaceable
+- Security: API keys/tokens in `.env` only, never in config or code
+- Observability: Rotating file logs + Discord channel reporting for errors
 
 **Integration Standards:**
-- API-first design with comprehensive documentation
-- Event-driven architecture for loose coupling
-- Container-based deployment with orchestration
-- Cloud-native patterns for reliability and scaling
+- Craig Bot API for audio acquisition (unofficial, handle API changes gracefully)
+- Discord Gateway events for trigger detection
+- Google Drive polling for automated workflow
+- Anthropic API with structured prompt templates
 
 **Quality Standards:**
-- Comprehensive automated testing (unit, integration, system)
-- Real-time monitoring and alerting for all services
-- Security audits and compliance validation
-- Performance benchmarking against established targets
+- pytest with 139+ test cases covering all pipeline stages
+- Async test patterns with pytest-asyncio
+- Mock isolation for external services
+- CUDA/GPU availability checks with CPU fallback
 
 ## **Decision-Making Process**
 

@@ -21,7 +21,7 @@ This command creates comprehensive planning documentation for a feature request.
 
 **Output Location**: All files saved to `rpi/{feature-slug}/plan/`
 
-**This is Step 3 of the RPI Workflow** (after Research approves with GO).
+**This is Step 3 (Plan) of the RPI Workflow** (after Step 2: Research approves with GO).
 
 ## Outline
 
@@ -150,39 +150,24 @@ This command creates comprehensive planning documentation for a feature request.
 **Agent**: senior-software-engineer
 
 **Process**:
-1. **Design High-Level Architecture**:
-   - Component/module structure
-   - Data flow diagrams
-   - API interfaces
-   - Database schema changes
 
-2. **Define Implementation Approach**:
-   - File structure and organization
-   - Code organization patterns
-   - Testing strategy
-   - Error handling approach
+1. **Launch senior-software-engineer agent** with:
+   - Phase 1 の要件スコープ
+   - Phase 2 の技術要件と依存関係
+   - Research report の技術的発見
 
-3. **Plan Database/Storage Changes** (if applicable):
-   - New collections/tables
-   - Schema modifications
-   - Migration strategy
-   - Data validation rules
+2. **Agent analyzes**:
+   - **アーキテクチャ設計**: コンポーネント/モジュール構造、データフロー、APIインターフェース、DBスキーマ変更
+   - **実装アプローチ**: ファイル構成、コード構成パターン、テスト戦略、エラーハンドリング
+   - **DB/ストレージ変更**: 新規テーブル、スキーマ修正、マイグレーション戦略（該当する場合）
+   - **APIコントラクト**: リクエスト/レスポンス形式、認証要件、エラーレスポンス（該当する場合）
+   - **テスト戦略**: ユニットテスト、統合テスト、E2Eテストの計画
 
-4. **Design API Contracts** (if applicable):
-   - Request/response formats
-   - Authentication requirements
-   - Error responses
-
-5. **Plan Testing Strategy**:
-   - Unit test requirements
-   - Integration test scenarios
-   - End-to-end test cases
-
-**Outputs**:
-- Architecture design document (internal)
-- API specifications
-- Database schema design
-- Testing strategy
+3. **Agent provides**:
+   - アーキテクチャ設計ドキュメント（内部用）
+   - API仕様
+   - DBスキーマ設計
+   - テスト戦略
 
 **Validation**:
 - [ ] High-level architecture designed
@@ -238,37 +223,21 @@ This command creates comprehensive planning documentation for a feature request.
 
 **Prerequisites**: Phases 1-4 complete
 
-**Agent**: documentation-analyst-writer (via Task tool)
-
 **Process**:
-1. **Generate pm.md** (Product Requirements):
-   - Feature description and user stories
-   - Constitutional alignment (if applicable)
-   - Business value and success metrics
-   - User personas and use cases
-   - Acceptance criteria
-   - Out of scope items
 
-2. **Generate ux.md** (User Experience Design):
-   - User interface mockups (text description)
-   - User flows and interactions
-   - Accessibility considerations
-   - Error states and edge cases
+各ドキュメントを専門エージェントで生成する:
 
-3. **Generate eng.md** (Technical Specification):
-   - Architecture design
-   - API specifications
-   - Database schema changes
-   - Technology stack
-   - Technical risks and mitigation
+1. **Launch product-manager agent** — pm.md (Product Requirements) を生成:
+   - Agent provides: ユーザーストーリー、ビジネス価値、受入基準、スコープ外項目
 
-4. **Generate PLAN.md** (Implementation Roadmap):
-   - Phased implementation breakdown
-   - Task list with estimates per phase
-   - Dependencies and ordering
-   - Success criteria per phase
-   - Testing requirements
-   - Validation checkpoints
+2. **Launch ux-designer agent** — ux.md (User Experience Design) を生成:
+   - Agent provides: UIモックアップ（テキスト記述）、ユーザーフロー、アクセシビリティ、エラー状態
+
+3. **Launch senior-software-engineer agent** — eng.md (Technical Specification) を生成:
+   - Agent provides: アーキテクチャ設計、API仕様、DBスキーマ変更、技術リスクと対策
+
+4. **Launch documentation-analyst-writer agent** — PLAN.md (Implementation Roadmap) を生成:
+   - Agent provides: フェーズ別実装計画、タスクリスト、依存関係、成功基準、テスト要件
 
 **Output Files** (all saved to `rpi/{feature-slug}/plan/`):
 - `pm.md` - Product requirements
@@ -297,17 +266,14 @@ This command orchestrates specialist agents:
 | Phase 5 | product-manager | Custom | Product requirements (pm.md) |
 | Phase 5 | ux-designer | Custom | User experience (ux.md) |
 | Phase 5 | senior-software-engineer | Custom | Technical spec (eng.md) |
-| Phase 5 | documentation-analyst-writer | Built-in | Documentation synthesis |
+| Phase 5 | documentation-analyst-writer | Custom | Documentation synthesis |
 
 ### Agent Invocation
 
-**Custom Agents** (product-manager, senior-software-engineer, ux-designer):
+**Custom Agents** (product-manager, senior-software-engineer, ux-designer, documentation-analyst-writer):
 - Claude Code automatically detects these from `.claude/agents/`
 - Reference them naturally: "Acting as the senior-software-engineer agent..."
 - NO Task tool invocation needed
-
-**Built-in Agent** (documentation-analyst-writer):
-- Use Task tool with `subagent_type="documentation-analyst-writer"`
 
 ---
 
@@ -393,7 +359,7 @@ Files created:
 ## Notes
 
 - **Prerequisites**: Research completed with GO recommendation
-- **Part of RPI Workflow**: Step 3 of 4 (Describe → Research → Plan → Implement)
+- **Part of RPI Workflow**: Step 3 of 6 (Decompose → Describe → Research → **Plan** → Validate → Implement)
 
 **Best Practices**:
 1. **Review Research First**: Ensure you understand the viability assessment
