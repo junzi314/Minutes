@@ -112,6 +112,36 @@ class TestTranscriberUnit:
         assert len(result) == 4  # 2 segments per track, 2 tracks
         assert mock_model.transcribe.call_count == 2
 
+    def test_auto_language_passes_none(self, tmp_path: Path) -> None:
+        """language='auto' should pass None to Whisper."""
+        cfg = WhisperConfig(model="tiny", language="auto", device="cpu",
+                            compute_type="float32", beam_size=1, vad_filter=False)
+        t = Transcriber(cfg)
+        mock_info = MagicMock(language="ja", language_probability=0.9)
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = ([], mock_info)
+        t._model = mock_model
+        f = tmp_path / "test.aac"
+        f.write_bytes(b"\x00")
+        t.transcribe_file(f, "speaker")
+        _, kwargs = mock_model.transcribe.call_args
+        assert kwargs["language"] is None
+
+    def test_explicit_language_passes_through(self, tmp_path: Path) -> None:
+        """Explicit language code should be passed through unchanged."""
+        cfg = WhisperConfig(model="tiny", language="en", device="cpu",
+                            compute_type="float32", beam_size=1, vad_filter=False)
+        t = Transcriber(cfg)
+        mock_info = MagicMock(language="en", language_probability=0.99)
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = ([], mock_info)
+        t._model = mock_model
+        f = tmp_path / "test.aac"
+        f.write_bytes(b"\x00")
+        t.transcribe_file(f, "speaker")
+        _, kwargs = mock_model.transcribe.call_args
+        assert kwargs["language"] == "en"
+
     def test_empty_text_segments_filtered(self, tmp_path: Path) -> None:
         t = Transcriber(_UNIT_CFG)
 

@@ -77,9 +77,10 @@ class Transcriber:
         t0 = time.monotonic()
 
         try:
+            language = None if self._cfg.language == "auto" else self._cfg.language
             segments_iter, info = self._model.transcribe(
                 str(path),
-                language=self._cfg.language,
+                language=language,
                 beam_size=self._cfg.beam_size,
                 vad_filter=self._cfg.vad_filter,
             )

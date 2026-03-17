@@ -24,6 +24,7 @@ from src.detector import DetectedRecording, RECORDING_URL_PATTERN, parse_recordi
 from src.drive_watcher import DriveWatcher
 from src.errors import MinutesBotError
 from src.generator import MinutesGenerator
+from src.minutes_archive import MinutesArchive
 from src.pipeline import run_pipeline, run_pipeline_from_tracks
 from src.poster import OutputChannel
 from src.state_store import StateStore
@@ -123,12 +124,14 @@ class MinutesBot(discord.Client):
         transcriber: Transcriber,
         generator: MinutesGenerator,
         state_store: StateStore,
+        archive: MinutesArchive | None = None,
         **kwargs: object,
     ) -> None:
         self.cfg = cfg
         self.transcriber = transcriber
         self.generator = generator
         self.state_store = state_store
+        self.archive = archive
         self.http_session: aiohttp.ClientSession | None = None
         self.drive_watcher: DriveWatcher | None = None
         self._start_time = time.monotonic()
@@ -144,6 +147,8 @@ class MinutesBot(discord.Client):
         """Clean up resources on shutdown."""
         if self.drive_watcher is not None:
             self.drive_watcher.stop()
+        if self.archive is not None:
+            self.archive.close()
         if self.http_session and not self.http_session.closed:
             await self.http_session.close()
             logger.debug("aiohttp.ClientSession closed")
@@ -190,6 +195,7 @@ class MinutesBot(discord.Client):
                     source_label: str,
                     tmp_dir: Path,
                 ) -> None:
+                    template_name = self.resolve_template(first_guild.guild_id)
                     await run_pipeline_from_tracks(
                         tracks=tracks,
                         cfg=self.cfg,
@@ -198,6 +204,8 @@ class MinutesBot(discord.Client):
                         output_channel=output_channel,
                         state_store=self.state_store,
                         source_label=source_label,
+                        template_name=template_name,
+                        archive=self.archive,
                     )
 
                 self.drive_watcher = DriveWatcher(
@@ -211,6 +219,19 @@ class MinutesBot(discord.Client):
                     first_guild.output_channel_id,
                     first_guild.guild_id,
                 )
+
+    def resolve_template(self, guild_id: int) -> str:
+        """Resolve template name for a guild.
+
+        Priority: state_store override -> GuildConfig.template -> "minutes"
+        """
+        override = self.state_store.get_guild_template(guild_id)
+        if override:
+            return override
+        guild_cfg = self.cfg.discord.get_guild(guild_id)
+        if guild_cfg:
+            return guild_cfg.template
+        return "minutes"
 
     def _get_output_channel_for_guild(
         self, guild_cfg: GuildConfig | None
@@ -293,6 +314,8 @@ class MinutesBot(discord.Client):
             )
             return
 
+        template_name = self.resolve_template(recording.guild_id)
+
         task = asyncio.create_task(
             run_pipeline(
                 recording=recording,
@@ -302,6 +325,8 @@ class MinutesBot(discord.Client):
                 generator=self.generator,
                 output_channel=output_channel,
                 state_store=self.state_store,
+                template_name=template_name,
+                archive=self.archive,
             ),
             name=f"pipeline-{rec_id}",
         )
@@ -349,6 +374,7 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
             f"**GPU**: {'available' if gpu_available else 'not available'}",
             f"**Generator**: {client.cfg.generator.model} ({'ready' if client.generator.is_loaded else 'not ready'})",
         ]
+        lines.append(f"**Template**: {client.resolve_template(interaction.guild_id or 0)}")
         if guild_cfg:
             lines.append(f"**Watch channel**: <#{guild_cfg.watch_channel_id}>")
             lines.append(f"**Output channel**: <#{guild_cfg.output_channel_id}>")
@@ -433,6 +459,104 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
         ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
+    @group.command(name="template-list", description="Show available templates")
+    async def template_list(interaction: discord.Interaction) -> None:
+        templates = client.generator.list_templates()
+        current = client.resolve_template(interaction.guild_id or 0)
+        embed = discord.Embed(title="利用可能なテンプレート", color=0x5865F2)
+        for t in templates:
+            marker = " (現在)" if t.name == current else ""
+            embed.add_field(
+                name=f"{t.display_name}{marker}",
+                value=t.description or "説明なし",
+                inline=False,
+            )
+        embed.set_footer(text="/minutes template-set <名前> で変更")
+        await interaction.response.send_message(embed=embed)
+
+    @group.command(name="template-set", description="Set the template for this guild")
+    @discord.app_commands.checks.has_permissions(manage_guild=True)
+    @discord.app_commands.describe(name="Template name")
+    async def template_set(interaction: discord.Interaction, name: str) -> None:
+        available = {t.name for t in client.generator.list_templates()}
+        if name not in available:
+            await interaction.response.send_message(
+                f"テンプレート `{name}` は見つかりません。\n"
+                f"`/minutes template-list` で利用可能なテンプレートを確認してください。",
+                ephemeral=True,
+            )
+            return
+        client.state_store.set_guild_template(interaction.guild_id or 0, name)
+        await interaction.response.send_message(
+            f"テンプレートを **{name}** に変更しました。次回の議事録生成から適用されます。",
+            ephemeral=True,
+        )
+
+    @template_set.error
+    async def template_set_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError) -> None:
+        if isinstance(error, discord.app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "テンプレート変更には「サーバー管理」権限が必要です。", ephemeral=True
+            )
+        else:
+            raise error
+
+    @template_set.autocomplete("name")
+    async def template_name_autocomplete(
+        interaction: discord.Interaction, current: str
+    ) -> list[discord.app_commands.Choice[str]]:
+        templates = client.generator.list_templates()
+        return [
+            discord.app_commands.Choice(name=t.display_name, value=t.name)
+            for t in templates if current.lower() in t.name.lower()
+        ][:25]
+
+    @group.command(name="search", description="過去の議事録をキーワードで検索")
+    @discord.app_commands.describe(keyword="検索キーワード")
+    async def minutes_search(interaction: discord.Interaction, keyword: str) -> None:
+        if client.archive is None:
+            await interaction.response.send_message(
+                "議事録アーカイブが有効になっていません。", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild_id or 0
+        limit = client.cfg.minutes_archive.max_search_results
+
+        results = await asyncio.to_thread(
+            client.archive.search, guild_id, keyword, limit
+        )
+
+        if not results:
+            total = await asyncio.to_thread(client.archive.count, guild_id)
+            if total == 0:
+                await interaction.response.send_message(
+                    "まだアーカイブされた議事録がありません。"
+                    "議事録が生成されると自動的にアーカイブされます。",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"「{keyword}」に一致する議事録は見つかりませんでした。",
+                    ephemeral=True,
+                )
+            return
+
+        embed = discord.Embed(
+            title=f"議事録検索結果 — 「{keyword}」",
+            color=0x5865F2,
+        )
+        for r in results:
+            speakers_text = f" — 参加者: {r.speakers}" if r.speakers else ""
+            embed.add_field(
+                name=f"{r.date_str}{speakers_text}",
+                value=r.snippet[:200] or "(スニペットなし)",
+                inline=False,
+            )
+        total = await asyncio.to_thread(client.archive.count, guild_id)
+        embed.set_footer(text=f"{len(results)}件 / {total}件のアーカイブから検索")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     tree.add_command(group)
 
 
@@ -482,6 +606,13 @@ def main() -> None:
     generator = MinutesGenerator(cfg.generator)
     generator.load()
 
+    # Initialise minutes archive
+    archive: MinutesArchive | None = None
+    if cfg.minutes_archive.enabled:
+        archive_path = Path(cfg.pipeline.state_dir) / "minutes_archive.db"
+        archive = MinutesArchive(archive_path)
+        logger.info("MinutesArchive enabled at %s", archive_path)
+
     # Create client with required intents
     intents = discord.Intents.default()
     intents.guilds = True
@@ -493,6 +624,7 @@ def main() -> None:
         transcriber=transcriber,
         generator=generator,
         state_store=state_store,
+        archive=archive,
         intents=intents,
     )
 

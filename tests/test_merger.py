@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from src.config import MergerConfig
-from src.merger import _format_timestamp, merge_transcripts
+from src.merger import _format_timestamp, format_transcript_markdown, merge_transcripts
 from src.transcriber import Segment
 
 # Default config
@@ -163,3 +163,44 @@ class TestMergeTranscripts:
         lines = result.split("\n")
         assert len(lines) == 1  # all merged
         assert "A B C" in lines[0]
+
+
+# --- format_transcript_markdown ---
+
+
+class TestFormatTranscriptMarkdown:
+    def test_empty_input(self) -> None:
+        assert format_transcript_markdown("", "2026-03-16", "Alice") == ""
+
+    def test_basic_formatting(self) -> None:
+        transcript = "[00:00] Alice: Hello\n[00:30] Bob: Hi there"
+        result = format_transcript_markdown(transcript, "2026-03-16", "Alice, Bob")
+        assert "# 文字起こし" in result
+        assert "- 日時: 2026-03-16" in result
+        assert "- 参加者: Alice, Bob" in result
+        assert "### 00:00:00" in result
+        assert "**Alice:** Hello" in result
+        assert "**Bob:** Hi there" in result
+
+    def test_section_headers_at_interval(self) -> None:
+        # 180 seconds apart → should create two sections
+        transcript = "[00:00] Alice: First\n[03:05] Bob: Second"
+        result = format_transcript_markdown(
+            transcript, "2026-03-16", "Alice, Bob", section_interval_sec=180,
+        )
+        assert "### 00:00:00" in result
+        assert "### 00:03:00" in result
+
+    def test_same_section_no_duplicate_header(self) -> None:
+        # Both within same 3-minute section
+        transcript = "[01:00] Alice: First\n[02:30] Bob: Second"
+        result = format_transcript_markdown(
+            transcript, "2026-03-16", "Alice, Bob", section_interval_sec=180,
+        )
+        # Should only have one section header
+        assert result.count("### 00:00:00") == 1
+
+    def test_hh_mm_ss_input_format(self) -> None:
+        transcript = "[01:05:30] Alice: Late in meeting"
+        result = format_transcript_markdown(transcript, "2026-03-16", "Alice")
+        assert "**Alice:** Late in meeting" in result

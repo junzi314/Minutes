@@ -28,17 +28,19 @@ from src.craig_client import CraigClient
 from src.detector import DetectedRecording
 from src.errors import MinutesBotError, ProcessingTimeoutError, TranscriptionError
 from src.generator import MinutesGenerator
-from src.merger import merge_transcripts
+from src.merger import format_transcript_markdown, merge_transcripts
 from src.poster import OutputChannel, post_error, post_minutes, send_status_update
 from src.state_store import StateStore
+from src.minutes_archive import MinutesArchive
 from src.transcriber import Segment, Transcriber
 
 logger = logging.getLogger(__name__)
 
 
-def _transcript_hash(transcript: str) -> str:
-    """Compute a deterministic cache key from the transcript text."""
-    return hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+def _transcript_hash(transcript: str, template_name: str = "minutes") -> str:
+    """Compute a deterministic cache key from the transcript text and template."""
+    key = f"{template_name}:{transcript}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 async def run_pipeline_from_tracks(
@@ -49,6 +51,8 @@ async def run_pipeline_from_tracks(
     output_channel: OutputChannel,
     state_store: StateStore,
     source_label: str = "unknown",
+    template_name: str = "minutes",
+    archive: MinutesArchive | None = None,
 ) -> None:
     """Execute stages 2-5 (transcribe -> merge -> generate -> post) on pre-downloaded tracks.
 
@@ -77,6 +81,14 @@ async def run_pipeline_from_tracks(
             # Stage 2: Transcribe (runs in thread to keep event loop free)
             segments = await _stage_transcribe(transcriber, tracks)
 
+            # Speaker analytics (between transcribe and merge)
+            speaker_stats_text: str | None = None
+            if cfg.speaker_analytics.enabled:
+                from src.speaker_analytics import calculate_speaker_stats, format_stats_embed
+                stats = calculate_speaker_stats(segments)
+                if stats:
+                    speaker_stats_text = format_stats_embed(stats)
+
             # Stage 3: Merge transcript
             transcript = merge_transcripts(segments, cfg.merger)
             if not transcript:
@@ -87,9 +99,16 @@ async def run_pipeline_from_tracks(
             # Stage 4: Generate minutes (with cache)
             speakers_str = ", ".join(speaker_names)
             date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            # Prepare transcript markdown for attachment (if enabled)
+            transcript_md: str | None = None
+            if cfg.poster.include_transcript:
+                transcript_md = format_transcript_markdown(
+                    transcript, date_str, speakers_str,
+                )
             guild_name = output_channel.guild.name if output_channel.guild else ""
 
-            th = _transcript_hash(transcript)
+            th = _transcript_hash(transcript, template_name)
             minutes_md = state_store.get_cached_minutes(th)
 
             if minutes_md is None:
@@ -102,6 +121,7 @@ async def run_pipeline_from_tracks(
                     speakers=speakers_str,
                     guild_name=guild_name,
                     channel_name=output_channel.name,
+                    template_name=template_name,
                 )
                 state_store.put_cached_minutes(th, minutes_md)
             else:
@@ -113,13 +133,32 @@ async def run_pipeline_from_tracks(
             )
 
             # Stage 5: Post to Discord
-            await post_minutes(
+            message = await post_minutes(
                 channel=output_channel,
                 minutes_md=minutes_md,
                 date=date_str,
                 speakers=speakers_str,
                 cfg=cfg.poster,
+                speaker_stats=speaker_stats_text,
+                transcript_md=transcript_md,
             )
+
+            # Archive (fault-tolerant)
+            if archive is not None and cfg.minutes_archive.enabled:
+                try:
+                    archive.store(
+                        guild_id=output_channel.guild.id,
+                        date_str=date_str,
+                        speakers=speakers_str,
+                        minutes_md=minutes_md,
+                        source_label=source_label,
+                        channel_name=output_channel.name,
+                        template_name=template_name,
+                        transcript_hash=th,
+                        message_id=message.id if message else None,
+                    )
+                except Exception:
+                    logger.warning("Archive write failed (non-critical)", exc_info=True)
 
         # Clean up status message
         if status_msg:
@@ -204,6 +243,8 @@ async def run_pipeline(
     generator: MinutesGenerator,
     output_channel: OutputChannel,
     state_store: StateStore,
+    template_name: str = "minutes",
+    archive: MinutesArchive | None = None,
 ) -> None:
     """Execute the full pipeline from Craig download through Discord posting."""
     status_msg: discord.Message | None = None
@@ -243,6 +284,8 @@ async def run_pipeline(
                 output_channel=output_channel,
                 state_store=state_store,
                 source_label=f"craig:{recording.rec_id}",
+                template_name=template_name,
+                archive=archive,
             )
 
     except MinutesBotError as exc:

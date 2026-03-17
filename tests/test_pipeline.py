@@ -22,8 +22,10 @@ from src.config import (
     GuildConfig,
     LoggingConfig,
     MergerConfig,
+    MinutesArchiveConfig,
     PipelineConfig,
     PosterConfig,
+    SpeakerAnalyticsConfig,
     WhisperConfig,
 )
 from src.detector import DetectedRecording
@@ -33,7 +35,7 @@ from src.errors import (
     PostingError,
     TranscriptionError,
 )
-from src.pipeline import run_pipeline
+from src.pipeline import _transcript_hash, run_pipeline, run_pipeline_from_tracks
 from src.state_store import StateStore
 from src.transcriber import Segment
 
@@ -43,8 +45,8 @@ from src.transcriber import Segment
 # ---------------------------------------------------------------------------
 
 
-def _make_config() -> Config:
-    return Config(
+def _make_config(**overrides: object) -> Config:
+    kwargs: dict[str, object] = dict(
         discord=DiscordConfig(
             token="test-token",
             guilds=(GuildConfig(guild_id=1, watch_channel_id=2, output_channel_id=3),),
@@ -58,7 +60,11 @@ def _make_config() -> Config:
         logging=LoggingConfig(),
         google_drive=GoogleDriveConfig(),
         pipeline=PipelineConfig(),
+        speaker_analytics=SpeakerAnalyticsConfig(),
+        minutes_archive=MinutesArchiveConfig(),
     )
+    kwargs.update(overrides)
+    return Config(**kwargs)
 
 
 def _make_recording() -> DetectedRecording:
@@ -379,7 +385,7 @@ class TestPipelinePostingFailure:
             call_count += 1
             # First few calls are status messages (succeed).
             # The minutes embed post fails.
-            if kwargs.get("embed") is not None and kwargs.get("file") is not None:
+            if kwargs.get("embed") is not None and (kwargs.get("file") is not None or kwargs.get("files") is not None):
                 import discord
                 raise discord.HTTPException(
                     response=MagicMock(status=500),
@@ -441,3 +447,205 @@ class TestPipelineEmptyTranscript:
 
         # Generator should NOT have been called
         mock_generator.generate.assert_not_called()
+
+
+class TestPipelineSpeakerAnalytics:
+    @pytest.mark.asyncio
+    async def test_speaker_stats_passed_to_post_minutes(
+        self,
+        cfg: Config,
+        recording: DetectedRecording,
+        mock_session: MagicMock,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """When speaker_analytics is enabled, stats are passed to post_minutes."""
+        tracks = _make_tracks(tmp_path)
+
+        with (
+            patch("src.pipeline._stage_download", new_callable=AsyncMock) as mock_dl,
+            patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post,
+        ):
+            mock_dl.return_value = tracks
+            mock_post.return_value = MagicMock(id=1)
+
+            await run_pipeline(
+                recording=recording,
+                session=mock_session,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs["speaker_stats"] is not None
+        assert "alice" in call_kwargs["speaker_stats"]
+
+    @pytest.mark.asyncio
+    async def test_speaker_stats_disabled(
+        self,
+        recording: DetectedRecording,
+        mock_session: MagicMock,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """When speaker_analytics is disabled, stats are None."""
+        cfg = _make_config(speaker_analytics=SpeakerAnalyticsConfig(enabled=False))
+        tracks = _make_tracks(tmp_path)
+
+        with (
+            patch("src.pipeline._stage_download", new_callable=AsyncMock) as mock_dl,
+            patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post,
+        ):
+            mock_dl.return_value = tracks
+            mock_post.return_value = MagicMock(id=1)
+
+            await run_pipeline(
+                recording=recording,
+                session=mock_session,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs["speaker_stats"] is None
+
+
+class TestTranscriptHash:
+    def test_transcript_hash_includes_template(self) -> None:
+        """Different template names produce different cache keys."""
+        h1 = _transcript_hash("hello world", "minutes")
+        h2 = _transcript_hash("hello world", "todo-focused")
+        h3 = _transcript_hash("hello world", "minutes")
+        assert h1 != h2
+        assert h1 == h3
+
+    def test_transcript_hash_default_is_minutes(self) -> None:
+        """Default template_name is 'minutes'."""
+        h_default = _transcript_hash("hello world")
+        h_explicit = _transcript_hash("hello world", "minutes")
+        assert h_default == h_explicit
+
+
+# ---------------------------------------------------------------------------
+# Minutes archive integration
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineArchive:
+    @pytest.mark.asyncio
+    async def test_pipeline_archives_minutes(
+        self,
+        cfg: Config,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """Pipeline success triggers archive.store() with correct metadata."""
+        from src.minutes_archive import MinutesArchive
+
+        tracks = _make_tracks(tmp_path)
+        archive = MinutesArchive(tmp_path / "archive.db")
+
+        mock_channel.guild.id = 1
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            await run_pipeline_from_tracks(
+                tracks=tracks,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+                source_label="test-source",
+                archive=archive,
+            )
+
+        assert archive.count(1) == 1
+        results = archive.search(1, "会議")
+        assert len(results) == 1
+        archive.close()
+
+    @pytest.mark.asyncio
+    async def test_pipeline_archive_failure_non_blocking(
+        self,
+        cfg: Config,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """archive.store() failure does not block the pipeline."""
+        mock_archive = MagicMock()
+        mock_archive.store.side_effect = RuntimeError("DB write failed")
+
+        tracks = _make_tracks(tmp_path)
+        mock_channel.guild.id = 1
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            # Should not raise
+            await run_pipeline_from_tracks(
+                tracks=tracks,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+                archive=mock_archive,
+            )
+
+        # post_minutes was still called successfully
+        mock_post.assert_called_once()
+        # archive.store was attempted
+        mock_archive.store.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pipeline_no_archive_when_disabled(
+        self,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """When minutes_archive.enabled=False, archive.store() is not called."""
+        cfg = _make_config(minutes_archive=MinutesArchiveConfig(enabled=False))
+        mock_archive = MagicMock()
+
+        tracks = _make_tracks(tmp_path)
+        mock_channel.guild.id = 1
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            await run_pipeline_from_tracks(
+                tracks=tracks,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+                archive=mock_archive,
+            )
+
+        mock_archive.store.assert_not_called()

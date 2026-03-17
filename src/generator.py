@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic
@@ -15,28 +16,64 @@ from src.errors import GenerationError
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class TemplateInfo:
+    """Metadata about an available prompt template."""
+
+    name: str          # file stem: "minutes", "todo-focused"
+    display_name: str  # from "# name:" comment, or name
+    description: str   # from "# description:" comment
+    path: Path
+
+
+def _parse_template_metadata(path: Path) -> tuple[str, str]:
+    """Extract name and description from template file header comments.
+
+    Format::
+
+        # name: 表示名
+        # description: 説明文
+
+    Returns (display_name, description), either may be empty string.
+    """
+    display_name = ""
+    description = ""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped.startswith("#"):
+                break
+            if stripped.startswith("# name:"):
+                display_name = stripped[len("# name:"):].strip()
+            elif stripped.startswith("# description:"):
+                description = stripped[len("# description:"):].strip()
+    return display_name, description
+
+
 class MinutesGenerator:
     """Renders a prompt template and calls the Claude API to generate minutes."""
 
     def __init__(self, cfg: GeneratorConfig) -> None:
         self._cfg = cfg
-        self._template: str | None = None
+        self._templates: dict[str, str] = {}
+        self._prompts_dir: Path | None = None
         self._client: anthropic.Anthropic | None = None
 
     def load(self) -> None:
-        """Load the prompt template and initialise the API client.
+        """Load the default prompt template and initialise the API client.
 
         Call once at startup.  Subsequent calls are no-ops.
         """
-        if self._template is not None:
+        if self._templates:
             return
 
         path = Path(self._cfg.prompt_template_path)
         if not path.exists():
             raise GenerationError(f"Prompt template not found: {path}")
 
-        self._template = path.read_text(encoding="utf-8")
-        logger.debug("Loaded prompt template from %s (%d chars)", path, len(self._template))
+        self._prompts_dir = path.parent
+        self._templates[path.stem] = path.read_text(encoding="utf-8")
+        logger.debug("Loaded prompt template from %s (%d chars)", path, len(self._templates[path.stem]))
 
         if not self._cfg.api_key:
             raise GenerationError("ANTHROPIC_API_KEY is not set")
@@ -44,9 +81,45 @@ class MinutesGenerator:
         self._client = anthropic.Anthropic(api_key=self._cfg.api_key)
         logger.info("MinutesGenerator initialised (model=%s)", self._cfg.model)
 
+    def _load_template(self, name: str) -> str:
+        """Load and cache a template by name. Raises GenerationError if not found."""
+        if name in self._templates:
+            return self._templates[name]
+
+        if ".." in name or "/" in name or "\\" in name:
+            raise GenerationError(f"Invalid template name: {name}")
+
+        if self._prompts_dir is None:
+            raise GenerationError("Generator not loaded -- call load() first")
+
+        path = self._prompts_dir / f"{name}.txt"
+        if not path.exists():
+            raise GenerationError(f"Template not found: {name}")
+
+        content = path.read_text(encoding="utf-8")
+        self._templates[name] = content
+        logger.debug("Loaded template '%s' from %s (%d chars)", name, path, len(content))
+        return content
+
+    def list_templates(self) -> list[TemplateInfo]:
+        """Scan prompts/ directory for available templates."""
+        if self._prompts_dir is None:
+            return []
+        templates = []
+        for p in sorted(self._prompts_dir.glob("*.txt")):
+            name = p.stem
+            display_name, description = _parse_template_metadata(p)
+            templates.append(TemplateInfo(
+                name=name,
+                display_name=display_name or name,
+                description=description or "",
+                path=p,
+            ))
+        return templates
+
     @property
     def is_loaded(self) -> bool:
-        return self._template is not None and self._client is not None
+        return bool(self._templates) and self._client is not None
 
     def render_prompt(
         self,
@@ -55,6 +128,7 @@ class MinutesGenerator:
         speakers: str,
         guild_name: str = "",
         channel_name: str = "",
+        template_name: str = "minutes",
     ) -> str:
         """Fill in template variables and return the rendered prompt.
 
@@ -62,10 +136,8 @@ class MinutesGenerator:
         breakage from literal braces in user-supplied values (guild names,
         transcript text, etc.).
         """
-        if self._template is None:
-            raise GenerationError("Template not loaded -- call load() first")
+        template = self._load_template(template_name)
 
-        result = self._template
         replacements = {
             "{transcript}": transcript,
             "{date}": date,
@@ -73,6 +145,7 @@ class MinutesGenerator:
             "{guild_name}": guild_name,
             "{channel_name}": channel_name,
         }
+        result = template
         for placeholder, value in replacements.items():
             result = result.replace(placeholder, value)
         return result
@@ -84,6 +157,7 @@ class MinutesGenerator:
         speakers: str,
         guild_name: str = "",
         channel_name: str = "",
+        template_name: str = "minutes",
     ) -> str:
         """Generate meeting minutes from a transcript.
 
@@ -99,6 +173,7 @@ class MinutesGenerator:
             speakers=speakers,
             guild_name=guild_name,
             channel_name=channel_name,
+            template_name=template_name,
         )
 
         last_exc: Exception | None = None

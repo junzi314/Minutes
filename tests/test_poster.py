@@ -14,6 +14,7 @@ from src.poster import (
     build_error_embed,
     build_minutes_embed,
     build_minutes_file,
+    build_transcript_file,
     post_error,
     post_minutes,
     send_status_update,
@@ -27,29 +28,27 @@ _SAMPLE_MINUTES = """\
 - 日時: 2026-02-10
 - 参加者: Alice, Bob
 
-## 要約
+## まとめ
+
 本会議ではプロジェクトの進捗確認と次期マイルストーンの設定を行った。
 主要タスクの期限を2/14に決定。
 
-## アジェンダ / 議題
-1. プロジェクト進捗報告
-2. 次期マイルストーン
+**プロジェクト進捗**
+Aliceより現状報告が行われ、順調に進んでいることが確認された。
 
-## 議論の詳細
-### 1. プロジェクト進捗報告
-- Aliceより現状報告。
+**マイルストーン設定**
+次期マイルストーンの期限をBob担当で2/14に設定した。
 
-## 決定事項
-- タスクAの期限を2/14に設定（担当: Bob）
-- レビューを来週月曜に実施（担当: Alice）
+## 詳細
 
-## 次回アクション / TODO
-| 担当 | タスク | 期限 |
-|------|--------|------|
-| Bob | タスクA完了 | 2/14 |
+* **プロジェクト進捗報告**: Aliceより現状の進捗について報告があった。全体として順調に進んでいる。([00:00])
+* **タスクAの期限設定**: Bobが担当するタスクAの期限を2/14に設定することが決定された。([01:30])
+* **レビュー日程の調整**: 来週月曜にAlice担当でレビューを実施することが合意された。([03:00])
 
-## 懸念事項・リスク
-- 特になし
+## 推奨される次のステップ
+
+- [ ] BobはタスクAを2/14までに完了します。
+- [ ] Aliceは来週月曜にレビューを実施します。
 """
 
 
@@ -79,7 +78,7 @@ class TestExtractSection:
         assert "進捗確認" in result
         assert "マイルストーン" in result
 
-    def test_extract_decisions(self) -> None:
+    def test_extract_next_steps(self) -> None:
         result = _extract_section(_SAMPLE_MINUTES, _DECISIONS_PATTERN)
         assert "タスクA" in result
         assert "Bob" in result
@@ -102,8 +101,8 @@ class TestBuildMinutesEmbed:
         embed = build_minutes_embed(_SAMPLE_MINUTES, "2026-02-10", "Alice, Bob", _CFG)
         field_names = [f.name for f in embed.fields]
         assert "参加者" in field_names
-        assert "要約" in field_names
-        assert "決定事項" in field_names
+        assert "まとめ" in field_names
+        assert "次のステップ" in field_names
 
     def test_embed_color(self) -> None:
         embed = build_minutes_embed(_SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG)
@@ -119,9 +118,9 @@ class TestBuildMinutesEmbed:
         assert "参加者" not in field_names
 
     def test_embed_long_summary_truncated(self) -> None:
-        long_summary = "## 要約\n" + "あ" * 2000 + "\n## 決定事項\n- テスト"
+        long_summary = "## まとめ\n" + "あ" * 2000 + "\n## 推奨される次のステップ\n- テスト"
         embed = build_minutes_embed(long_summary, "2026-02-10", "Alice", _CFG)
-        summary_field = next(f for f in embed.fields if f.name == "要約")
+        summary_field = next(f for f in embed.fields if f.name == "まとめ")
         assert len(summary_field.value) <= 1024
 
     def test_embed_respects_max_length(self) -> None:
@@ -132,6 +131,19 @@ class TestBuildMinutesEmbed:
         ) + len(embed.footer.text or "")
         # Should have been trimmed to fit
         assert total <= 400  # allow some tolerance for field names
+
+    def test_embed_with_speaker_stats(self) -> None:
+        stats_text = "alice    \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2591\u2591  8:32  1,204\u5b57"
+        embed = build_minutes_embed(_SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG, speaker_stats=stats_text)
+        field_names = [f.name for f in embed.fields]
+        assert "\U0001f4ca \u8a71\u8005\u7d71\u8a08" in field_names
+        stats_field = next(f for f in embed.fields if "\u7d71\u8a08" in f.name)
+        assert "alice" in stats_field.value
+
+    def test_embed_without_speaker_stats(self) -> None:
+        embed = build_minutes_embed(_SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG, speaker_stats=None)
+        field_names = [f.name for f in embed.fields]
+        assert all("\u7d71\u8a08" not in name for name in field_names)
 
 
 # --- build_error_embed ---
@@ -212,6 +224,38 @@ class TestPostMinutesMention:
         call_kwargs = channel.send.call_args.kwargs
         assert call_kwargs["content"] is None
 
+    @pytest.mark.asyncio
+    async def test_text_channel_sends_files_list(self) -> None:
+        """TextChannel should use files= (list) instead of file=."""
+        channel = MagicMock(spec=discord.TextChannel)
+        msg = MagicMock()
+        msg.id = 1
+        channel.send = AsyncMock(return_value=msg)
+        channel.name = "test"
+
+        await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG)
+
+        call_kwargs = channel.send.call_args.kwargs
+        assert "files" in call_kwargs
+        assert len(call_kwargs["files"]) == 1  # no transcript
+
+    @pytest.mark.asyncio
+    async def test_text_channel_with_transcript(self) -> None:
+        """When transcript_md is provided, two files should be attached."""
+        channel = MagicMock(spec=discord.TextChannel)
+        msg = MagicMock()
+        msg.id = 1
+        channel.send = AsyncMock(return_value=msg)
+        channel.name = "test"
+
+        await post_minutes(
+            channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG,
+            transcript_md="# 文字起こし\ntest",
+        )
+
+        call_kwargs = channel.send.call_args.kwargs
+        assert len(call_kwargs["files"]) == 2
+
 
 # --- ForumChannel support ---
 
@@ -251,16 +295,17 @@ class TestPostMinutesForum:
         assert result.id == 42
 
     @pytest.mark.asyncio
-    async def test_forum_sends_file_in_thread(self) -> None:
+    async def test_forum_sends_files_in_thread(self) -> None:
         channel = _make_forum_channel()
 
         await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG)
 
-        # File sent as follow-up in the thread
+        # File(s) sent as follow-up in the thread
         thread_result = channel.create_thread.return_value
         thread_result.thread.send.assert_called_once()
         call_kwargs = thread_result.thread.send.call_args.kwargs
-        assert call_kwargs["file"] is not None
+        assert call_kwargs["files"] is not None
+        assert len(call_kwargs["files"]) >= 1
 
     @pytest.mark.asyncio
     async def test_forum_thread_includes_mentions(self) -> None:
@@ -296,6 +341,50 @@ class TestPostErrorForum:
         assert "エラー" in call_kwargs["name"]
         assert "transcription" in call_kwargs["name"]
         assert result.id == 42
+
+
+class TestPostMinutesForumWithTranscript:
+    @pytest.mark.asyncio
+    async def test_forum_sends_two_files_with_transcript(self) -> None:
+        channel = _make_forum_channel()
+
+        await post_minutes(
+            channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG,
+            transcript_md="# 文字起こし\ntest transcript",
+        )
+
+        thread_result = channel.create_thread.return_value
+        call_kwargs = thread_result.thread.send.call_args.kwargs
+        assert len(call_kwargs["files"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_forum_sends_one_file_without_transcript(self) -> None:
+        channel = _make_forum_channel()
+
+        await post_minutes(channel, _SAMPLE_MINUTES, "2026-02-10", "Alice", _CFG)
+
+        thread_result = channel.create_thread.return_value
+        call_kwargs = thread_result.thread.send.call_args.kwargs
+        assert len(call_kwargs["files"]) == 1
+
+
+# --- build_transcript_file ---
+
+
+class TestBuildTranscriptFile:
+    def test_file_filename(self) -> None:
+        f = build_transcript_file("content", "2026-02-10")
+        assert f.filename == "transcript_2026-02-10.md"
+
+    def test_file_content(self) -> None:
+        f = build_transcript_file("テスト内容", "2026-02-10")
+        data = f.fp.read()
+        assert data == "テスト内容".encode("utf-8")
+
+    def test_file_date_sanitization(self) -> None:
+        f = build_transcript_file("content", "2026/02/10 14:00")
+        assert "/" not in f.filename
+        assert " " not in f.filename
 
 
 class TestSendStatusUpdateForum:

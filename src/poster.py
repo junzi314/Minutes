@@ -23,10 +23,10 @@ _MAX_RETRIES = 3
 
 # Regex patterns to extract sections from generated minutes markdown
 _SUMMARY_PATTERN = re.compile(
-    r"## 要約\s*\n(.*?)(?=\n## |\Z)", re.DOTALL
+    r"## まとめ\s*\n(.*?)(?=\n## |\Z)", re.DOTALL
 )
 _DECISIONS_PATTERN = re.compile(
-    r"## 決定事項\s*\n(.*?)(?=\n## |\Z)", re.DOTALL
+    r"## 推奨される次のステップ\s*\n(.*?)(?=\n## |\Z)", re.DOTALL
 )
 _SPEAKERS_PATTERN = re.compile(
     r"- 参加者:\s*(.+)"
@@ -53,6 +53,7 @@ def build_minutes_embed(
     date: str,
     speakers: str,
     cfg: PosterConfig,
+    speaker_stats: str | None = None,
 ) -> discord.Embed:
     """Build a Discord embed summarising the generated minutes."""
     summary = _extract_section(minutes_md, _SUMMARY_PATTERN)
@@ -75,16 +76,24 @@ def build_minutes_embed(
     # Summary
     if summary:
         embed.add_field(
-            name="要約",
+            name="まとめ",
             value=_truncate(summary, 1024),
             inline=False,
         )
 
-    # Decisions
+    # Next steps
     if decisions:
         embed.add_field(
-            name="決定事項",
+            name="次のステップ",
             value=_truncate(decisions, 1024),
+            inline=False,
+        )
+
+    # Speaker statistics (after decisions, before footer)
+    if speaker_stats:
+        embed.add_field(
+            name="\U0001f4ca 話者統計",
+            value=_truncate(speaker_stats, 1024),
             inline=False,
         )
 
@@ -103,7 +112,7 @@ def build_minutes_embed(
             trimmed = current_summary[: len(current_summary) - overshoot - 3] + "..."
             embed.set_field_at(
                 1,
-                name="要約",
+                name="まとめ",
                 value=trimmed,
                 inline=False,
             )
@@ -143,6 +152,14 @@ def build_minutes_file(minutes_md: str, date: str) -> discord.File:
     return discord.File(fp=buffer, filename=filename)
 
 
+def build_transcript_file(transcript_md: str, date: str) -> discord.File:
+    """Create a discord.File attachment from the formatted transcript markdown."""
+    safe_date = date.replace("/", "-").replace(" ", "_")
+    filename = f"transcript_{safe_date}.md"
+    buffer = io.BytesIO(transcript_md.encode("utf-8"))
+    return discord.File(fp=buffer, filename=filename)
+
+
 async def _send_with_retry(coro_factory, description: str) -> discord.Message:
     """Retry a Discord send/edit operation on rate limit (429) errors.
 
@@ -176,16 +193,26 @@ async def post_minutes(
     date: str,
     speakers: str,
     cfg: PosterConfig,
+    speaker_stats: str | None = None,
+    transcript_md: str | None = None,
 ) -> discord.Message:
-    """Post minutes embed + markdown file to the channel.
+    """Post minutes embed + markdown file(s) to the channel.
 
     For ForumChannel, creates a new thread with the minutes title.
     For TextChannel, sends a message directly.
+    When *transcript_md* is provided, attaches both minutes and transcript files.
     Retries on Discord rate limits. Returns the sent message.
     """
-    embed = build_minutes_embed(minutes_md, date, speakers, cfg)
+    embed = build_minutes_embed(minutes_md, date, speakers, cfg, speaker_stats=speaker_stats)
 
     mention_text = " ".join(f"<@{uid}>" for uid in cfg.mention_user_ids) or None
+
+    def _build_files() -> list[discord.File]:
+        """Build the list of file attachments (recreated each attempt)."""
+        files = [build_minutes_file(minutes_md, date)]
+        if transcript_md:
+            files.append(build_transcript_file(transcript_md, date))
+        return files
 
     if isinstance(channel, discord.ForumChannel):
         thread_title = _truncate(f"会議議事録 — {date}", 100)
@@ -205,31 +232,33 @@ async def post_minutes(
         thread = thread_result.thread
         message = thread_result.message
 
-        # Step 2: Send markdown file as a follow-up in the same thread
-        async def _send_file():
-            file = build_minutes_file(minutes_md, date)
-            return await thread.send(file=file)
+        # Step 2: Send file(s) as a follow-up in the same thread
+        async def _send_files():
+            files = _build_files()
+            return await thread.send(files=files)
 
-        await _send_with_retry(_send_file, "Post minutes file (forum thread)")
+        await _send_with_retry(_send_files, "Post minutes file(s) (forum thread)")
 
         logger.info(
-            "Minutes posted to forum #%s as thread '%s' (message_id=%d)",
+            "Minutes posted to forum #%s as thread '%s' (message_id=%d, files=%d)",
             channel.name,
             thread_title,
             message.id,
+            1 + (1 if transcript_md else 0),
         )
         return message
 
     async def _send():
-        # Recreate File each attempt (discord.py closes the buffer after send)
-        file = build_minutes_file(minutes_md, date)
-        return await channel.send(content=mention_text, embed=embed, file=file)
+        # Recreate Files each attempt (discord.py closes the buffer after send)
+        files = _build_files()
+        return await channel.send(content=mention_text, embed=embed, files=files)
 
     message = await _send_with_retry(_send, "Post minutes")
     logger.info(
-        "Minutes posted to #%s (message_id=%d)",
+        "Minutes posted to #%s (message_id=%d, files=%d)",
         channel.name,
         message.id,
+        1 + (1 if transcript_md else 0),
     )
     return message
 

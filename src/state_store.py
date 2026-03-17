@@ -74,6 +74,8 @@ class StateStore:
         # Load state from disk
         self._processing: dict[str, dict] = self._load_json(self._processing_path)
         self._cache: dict[str, str] = self._load_json(self._cache_path)
+        self._guild_settings_path = state_dir / "guild_settings.json"
+        self._guild_settings: dict[str, dict] = self._load_json(self._guild_settings_path)
 
     # ------------------------------------------------------------------
     # Processing state methods
@@ -208,6 +210,25 @@ class StateStore:
         logger.info("Minutes cached (key=%s...)", transcript_hash[:12])
 
     # ------------------------------------------------------------------
+    # Guild settings methods
+    # ------------------------------------------------------------------
+
+    def get_guild_template(self, guild_id: int) -> str | None:
+        """Return the template override for a guild, or None."""
+        settings = self._guild_settings.get(str(guild_id))
+        if settings is None:
+            return None
+        return settings.get("template")
+
+    def set_guild_template(self, guild_id: int, template_name: str) -> None:
+        """Set the template for a guild."""
+        key = str(guild_id)
+        if key not in self._guild_settings:
+            self._guild_settings[key] = {}
+        self._guild_settings[key]["template"] = template_name
+        self._flush_guild_settings()
+
+    # ------------------------------------------------------------------
     # Persistence helpers
     # ------------------------------------------------------------------
 
@@ -250,6 +271,9 @@ class StateStore:
 
     def _flush_cache(self) -> None:
         self._flush(self._cache, self._cache_path)
+
+    def _flush_guild_settings(self) -> None:
+        self._flush(self._guild_settings, self._guild_settings_path)
 
     # ------------------------------------------------------------------
     # Migration from legacy processed_files.json

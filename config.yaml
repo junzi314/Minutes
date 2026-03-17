@@ -37,8 +37,8 @@ craig:
 whisper:
   # Model size: tiny, base, small, medium, large-v1, large-v2, large-v3, etc.
   model: "large-v3"
-  # Language code (ISO 639-1): ja, en, zh, etc.
-  language: "ja"
+  # Language: "ja", "en", "auto" (auto-detect), or other ISO 639-1 codes
+  language: "auto"
   # Device: cuda or cpu
   device: "cuda"
   # Compute type: float16, int8, int8_float16, float32
@@ -60,7 +60,7 @@ generator:
   # Anthropic model for minutes generation
   model: "claude-sonnet-4-5-20250929"
   # Maximum tokens in the generated response
-  max_tokens: 4096
+  max_tokens: 8192
   # Temperature (0.0 = deterministic, 1.0 = creative)
   temperature: 0.3
   # Path to the prompt template file
@@ -76,7 +76,7 @@ poster:
   # Maximum characters per embed description
   max_embed_length: 4000
   # Whether to include the full transcript as a follow-up message
-  include_transcript: false
+  include_transcript: true
   # Maximum characters per message chunk (Discord limit is 2000)
   chunk_size: 1990
 
@@ -93,6 +93,16 @@ logging:
   max_bytes: 10485760
   # Number of rotated log files to keep
   backup_count: 5
+
+speaker_analytics:
+  # Enable speaker statistics in minutes embed
+  enabled: true
+
+minutes_archive:
+  # Enable local SQLite archive of generated minutes
+  enabled: true
+  # Maximum search results for /minutes search
+  max_search_results: 5
 
 google_drive:
   # Enable Google Drive folder monitoring

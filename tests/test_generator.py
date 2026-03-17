@@ -10,13 +10,14 @@ import pytest
 
 from src.config import GeneratorConfig
 from src.errors import GenerationError
-from src.generator import MinutesGenerator
+from src.generator import MinutesGenerator, TemplateInfo, _parse_template_metadata
 
 
 def _make_cfg(tmp_path: Path, api_key: str = "sk-test") -> GeneratorConfig:
     """Create a GeneratorConfig with a real template file."""
     template = tmp_path / "minutes.txt"
     template.write_text(
+        "# name: Standard\n# description: Standard template\n"
         "Date: {date}\nSpeakers: {speakers}\n"
         "Guild: {guild_name}\nChannel: {channel_name}\n"
         "Transcript:\n{transcript}",
@@ -87,6 +88,24 @@ class TestRenderPrompt:
         gen = MinutesGenerator(cfg)
         with pytest.raises(GenerationError, match="not loaded"):
             gen.render_prompt("t", "d", "s")
+
+    def test_render_with_template_name(self, tmp_path: Path) -> None:
+        """render_prompt uses the specified template."""
+        cfg = _make_cfg(tmp_path)
+        # Create a second template
+        custom = tmp_path / "custom.txt"
+        custom.write_text("CUSTOM: {transcript}", encoding="utf-8")
+
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        result = gen.render_prompt(
+            transcript="hello",
+            date="d",
+            speakers="s",
+            template_name="custom",
+        )
+        assert result == "CUSTOM: hello"
 
 
 class TestGenerate:
@@ -180,3 +199,83 @@ class TestGenerate:
 
         # Should have tried max_retries + 1 = 3 times
         assert gen._client.messages.create.call_count == 3
+
+
+class TestListTemplates:
+    def test_list_templates(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path)
+        # Create a second template
+        custom = tmp_path / "custom.txt"
+        custom.write_text(
+            "# name: Custom\n# description: A custom template\nContent",
+            encoding="utf-8",
+        )
+
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        templates = gen.list_templates()
+        names = [t.name for t in templates]
+        assert "minutes" in names
+        assert "custom" in names
+        assert all(isinstance(t, TemplateInfo) for t in templates)
+
+    def test_list_templates_before_load(self) -> None:
+        cfg = GeneratorConfig(api_key="sk-test")
+        gen = MinutesGenerator(cfg)
+        assert gen.list_templates() == []
+
+
+class TestParseTemplateMetadata:
+    def test_parse_both_fields(self, tmp_path: Path) -> None:
+        p = tmp_path / "test.txt"
+        p.write_text("# name: My Name\n# description: My Desc\nBody", encoding="utf-8")
+        display, desc = _parse_template_metadata(p)
+        assert display == "My Name"
+        assert desc == "My Desc"
+
+    def test_parse_no_metadata(self, tmp_path: Path) -> None:
+        p = tmp_path / "test.txt"
+        p.write_text("Just body content", encoding="utf-8")
+        display, desc = _parse_template_metadata(p)
+        assert display == ""
+        assert desc == ""
+
+    def test_parse_partial_metadata(self, tmp_path: Path) -> None:
+        p = tmp_path / "test.txt"
+        p.write_text("# name: Only Name\nBody", encoding="utf-8")
+        display, desc = _parse_template_metadata(p)
+        assert display == "Only Name"
+        assert desc == ""
+
+
+class TestLoadTemplate:
+    def test_load_template_not_found(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path)
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        with pytest.raises(GenerationError, match="Template not found"):
+            gen._load_template("nonexistent")
+
+    def test_path_traversal_rejected(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path)
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        for bad_name in ["../etc/passwd", "foo/bar", "a\\b"]:
+            with pytest.raises(GenerationError, match="Invalid template name"):
+                gen._load_template(bad_name)
+
+    def test_template_cached(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path)
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        # First load reads from disk
+        content1 = gen._load_template("minutes")
+        # Modify file on disk
+        (tmp_path / "minutes.txt").write_text("CHANGED", encoding="utf-8")
+        # Second load should return cached content
+        content2 = gen._load_template("minutes")
+        assert content1 == content2

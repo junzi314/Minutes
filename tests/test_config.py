@@ -212,6 +212,44 @@ class TestValidation:
             load(str(cfg_path), str(env_path))
 
 
+class TestWhisperLanguageValidation:
+    def test_invalid_whisper_language_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Invalid language code should raise ConfigError."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            whisper:
+              language: "xyz"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="whisper.language"):
+            load(str(cfg_path), str(env_path))
+
+    def test_auto_whisper_language_accepted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """'auto' should be accepted as a valid language."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            whisper:
+              language: "auto"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.whisper.language == "auto"
+
+
 class TestMultiGuild:
     def test_multi_guild_format(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
@@ -287,6 +325,63 @@ class TestMultiGuild:
 
         with pytest.raises(ConfigError, match="duplicated"):
             load(str(cfg_path), str(env_path))
+
+    def test_guild_config_template_default(self) -> None:
+        """GuildConfig template defaults to 'minutes'."""
+        g = GuildConfig(guild_id=1, watch_channel_id=2, output_channel_id=3)
+        assert g.template == "minutes"
+
+    def test_guild_config_template_from_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Template field is read from YAML config."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  watch_channel_id: 2
+                  output_channel_id: 3
+                  template: todo-focused
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.discord.guilds[0].template == "todo-focused"
+
+    def test_speaker_analytics_default_enabled(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SpeakerAnalyticsConfig defaults to enabled."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.speaker_analytics.enabled is True
+
+    def test_speaker_analytics_disabled_from_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """speaker_analytics.enabled can be set to false via YAML."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            speaker_analytics:
+              enabled: false
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.speaker_analytics.enabled is False
 
     def test_error_mention_role_shared(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """error_mention_role_id is shared across all guilds."""

@@ -547,3 +547,51 @@ class TestMigration:
 
         assert store.processing_count == 0
         assert not (tmp_path / "does_not_exist.json.bak").exists()
+
+
+# ===========================================================================
+# Guild settings
+# ===========================================================================
+
+
+class TestGuildSettings:
+    def test_guild_template_default_none(self, tmp_path: Path) -> None:
+        """Unset guild returns None."""
+        store = _make_store(tmp_path)
+        assert store.get_guild_template(12345) is None
+
+    def test_guild_template_set_get(self, tmp_path: Path) -> None:
+        """Set and get a guild template."""
+        store = _make_store(tmp_path)
+        store.set_guild_template(12345, "todo-focused")
+        assert store.get_guild_template(12345) == "todo-focused"
+
+    def test_guild_template_overwrite(self, tmp_path: Path) -> None:
+        """Setting a template overwrites the previous value."""
+        store = _make_store(tmp_path)
+        store.set_guild_template(12345, "minutes")
+        store.set_guild_template(12345, "custom")
+        assert store.get_guild_template(12345) == "custom"
+
+    def test_guild_template_persistence(self, tmp_path: Path) -> None:
+        """Guild settings are persisted to disk and survive reload."""
+        store = _make_store(tmp_path)
+        store.set_guild_template(99, "todo-focused")
+
+        # Verify file written
+        settings_path = tmp_path / "state" / "guild_settings.json"
+        assert settings_path.exists()
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert data["99"]["template"] == "todo-focused"
+
+        # Reload from disk
+        store2 = _make_store(tmp_path)
+        assert store2.get_guild_template(99) == "todo-focused"
+
+    def test_guild_template_multiple_guilds(self, tmp_path: Path) -> None:
+        """Multiple guilds can have independent templates."""
+        store = _make_store(tmp_path)
+        store.set_guild_template(1, "minutes")
+        store.set_guild_template(2, "todo-focused")
+        assert store.get_guild_template(1) == "minutes"
+        assert store.get_guild_template(2) == "todo-focused"

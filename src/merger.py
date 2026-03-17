@@ -80,3 +80,79 @@ def merge_transcripts(
         len({s.speaker for s in merged}),
     )
     return transcript
+
+
+def format_transcript_markdown(
+    transcript: str,
+    date: str,
+    speakers: str,
+    section_interval_sec: int = 180,
+) -> str:
+    """Convert ``[MM:SS] speaker: text`` transcript into Markdown with section headers.
+
+    Output format::
+
+        # 文字起こし
+        - 日時: 2026-03-16 14:01
+        - 参加者: Alice, Bob
+
+        ### 00:00:00
+
+        **Alice:** テキスト
+        **Bob:** テキスト
+
+        ### 00:03:00
+        ...
+
+    *section_interval_sec* controls how often ``### HH:MM:SS`` headers are inserted.
+    """
+    if not transcript:
+        return ""
+
+    lines = transcript.splitlines()
+    output_lines: list[str] = [
+        "# 文字起こし",
+        f"- 日時: {date}",
+        f"- 参加者: {speakers}",
+        "",
+    ]
+
+    # Parse [MM:SS] or [HH:MM:SS] prefix to total seconds
+    import re
+    ts_pattern = re.compile(r"^\[(?:(\d+):)?(\d+):(\d+)\]\s*(.+)$")
+
+    current_section_start: int | None = None
+
+    for line in lines:
+        m = ts_pattern.match(line)
+        if not m:
+            # Non-matching lines pass through as-is
+            output_lines.append(line)
+            continue
+
+        hh = int(m.group(1)) if m.group(1) else 0
+        mm = int(m.group(2))
+        ss = int(m.group(3))
+        total_sec = hh * 3600 + mm * 60 + ss
+        rest = m.group(4)  # "speaker: text"
+
+        # Determine section boundary
+        section_start = (total_sec // section_interval_sec) * section_interval_sec
+        if current_section_start is None or section_start != current_section_start:
+            current_section_start = section_start
+            sh = section_start // 3600
+            sm = (section_start % 3600) // 60
+            sss = section_start % 60
+            output_lines.append(f"### {sh:02d}:{sm:02d}:{sss:02d}")
+            output_lines.append("")
+
+        # Convert "speaker: text" → "**speaker:** text"
+        colon_idx = rest.find(": ")
+        if colon_idx != -1:
+            speaker = rest[:colon_idx]
+            text = rest[colon_idx + 2:]
+            output_lines.append(f"**{speaker}:** {text}")
+        else:
+            output_lines.append(rest)
+
+    return "\n".join(output_lines)
