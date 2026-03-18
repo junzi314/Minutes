@@ -595,3 +595,35 @@ class TestGuildSettings:
         store.set_guild_template(2, "todo-focused")
         assert store.get_guild_template(1) == "minutes"
         assert store.get_guild_template(2) == "todo-focused"
+
+
+class TestGuildGlossary:
+    def test_get_guild_glossary_empty(self, tmp_path: Path) -> None:
+        """Unset guild returns empty dict."""
+        store = _make_store(tmp_path)
+        assert store.get_guild_glossary(12345) == {}
+
+    def test_set_and_get_guild_glossary(self, tmp_path: Path) -> None:
+        """Set and get a guild glossary."""
+        store = _make_store(tmp_path)
+        glossary = {"ツーニック": "TOONIQ", "リアクト": "React"}
+        store.set_guild_glossary(12345, glossary)
+        result = store.get_guild_glossary(12345)
+        assert result == glossary
+
+    def test_guild_glossary_persists(self, tmp_path: Path) -> None:
+        """Glossary survives store reload."""
+        store = _make_store(tmp_path)
+        store.set_guild_glossary(99, {"figma": "Figma"})
+
+        store2 = _make_store(tmp_path)
+        assert store2.get_guild_glossary(99) == {"figma": "Figma"}
+
+    def test_guild_glossary_coexists_with_template(self, tmp_path: Path) -> None:
+        """Glossary and template coexist in the same guild settings."""
+        store = _make_store(tmp_path)
+        store.set_guild_template(1, "todo-focused")
+        store.set_guild_glossary(1, {"foo": "bar"})
+
+        assert store.get_guild_template(1) == "todo-focused"
+        assert store.get_guild_glossary(1) == {"foo": "bar"}

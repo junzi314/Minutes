@@ -582,6 +582,81 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
         ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
+    # -- Glossary commands --
+
+    @group.command(name="glossary-add", description="Add a glossary entry for transcript correction")
+    @discord.app_commands.checks.has_permissions(manage_guild=True)
+    @discord.app_commands.describe(wrong="Incorrect text from Whisper", correct="Correct replacement text")
+    async def glossary_add(interaction: discord.Interaction, wrong: str, correct: str) -> None:
+        guild_id = interaction.guild_id or 0
+        glossary = client.state_store.get_guild_glossary(guild_id)
+        glossary[wrong] = correct
+        client.state_store.set_guild_glossary(guild_id, glossary)
+        await interaction.response.send_message(
+            f"辞書に追加しました: `{wrong}` → `{correct}`", ephemeral=True,
+        )
+
+    @glossary_add.error
+    async def glossary_add_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError) -> None:
+        if isinstance(error, discord.app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "辞書の編集には「サーバー管理」権限が必要です。", ephemeral=True,
+            )
+        else:
+            raise error
+
+    @group.command(name="glossary-remove", description="Remove a glossary entry")
+    @discord.app_commands.checks.has_permissions(manage_guild=True)
+    @discord.app_commands.describe(wrong="The incorrect text entry to remove")
+    async def glossary_remove(interaction: discord.Interaction, wrong: str) -> None:
+        guild_id = interaction.guild_id or 0
+        glossary = client.state_store.get_guild_glossary(guild_id)
+        if wrong not in glossary:
+            await interaction.response.send_message(
+                f"辞書にエントリ `{wrong}` が見つかりません。", ephemeral=True,
+            )
+            return
+        del glossary[wrong]
+        client.state_store.set_guild_glossary(guild_id, glossary)
+        await interaction.response.send_message(
+            f"辞書から削除しました: `{wrong}`", ephemeral=True,
+        )
+
+    @glossary_remove.error
+    async def glossary_remove_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError) -> None:
+        if isinstance(error, discord.app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "辞書の編集には「サーバー管理」権限が必要です。", ephemeral=True,
+            )
+        else:
+            raise error
+
+    @group.command(name="glossary-list", description="Show current glossary entries")
+    @discord.app_commands.checks.has_permissions(manage_guild=True)
+    async def glossary_list(interaction: discord.Interaction) -> None:
+        guild_id = interaction.guild_id or 0
+        glossary = client.state_store.get_guild_glossary(guild_id)
+        if not glossary:
+            await interaction.response.send_message(
+                "辞書が空です。`/minutes glossary-add` でエントリを追加してください。",
+                ephemeral=True,
+            )
+            return
+        embed = discord.Embed(title="用語辞書", color=0x5865F2)
+        for wrong, correct in glossary.items():
+            embed.add_field(name=wrong, value=f"→ {correct}", inline=True)
+        embed.set_footer(text=f"{len(glossary)}件のエントリ")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @glossary_list.error
+    async def glossary_list_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError) -> None:
+        if isinstance(error, discord.app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "辞書の閲覧には「サーバー管理」権限が必要です。", ephemeral=True,
+            )
+        else:
+            raise error
+
     tree.add_command(group)
 
 

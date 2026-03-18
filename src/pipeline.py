@@ -82,6 +82,17 @@ async def run_pipeline_from_tracks(
             # Stage 2: Transcribe (runs in thread to keep event loop free)
             segments = await _stage_transcribe(transcriber, tracks)
 
+            # Glossary correction (between transcribe and merge)
+            if cfg.transcript_glossary.enabled:
+                guild_id = output_channel.guild.id if output_channel.guild else 0
+                glossary = state_store.get_guild_glossary(guild_id)
+                if glossary:
+                    from src.glossary import apply_glossary
+                    segments = apply_glossary(
+                        segments, glossary, cfg.transcript_glossary.case_sensitive,
+                    )
+                    logger.info("[glossary] Applied %d entries for guild=%d", len(glossary), guild_id)
+
             # Speaker analytics (between transcribe and merge)
             speaker_stats_text: str | None = None
             if cfg.speaker_analytics.enabled:

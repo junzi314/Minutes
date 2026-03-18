@@ -228,6 +228,21 @@ class StateStore:
         self._guild_settings[key]["template"] = template_name
         self._flush_guild_settings()
 
+    def get_guild_glossary(self, guild_id: int) -> dict[str, str]:
+        """Return the glossary dict for a guild (empty dict if not set)."""
+        settings = self._guild_settings.get(str(guild_id))
+        if settings is None:
+            return {}
+        return dict(settings.get("glossary", {}))
+
+    def set_guild_glossary(self, guild_id: int, glossary: dict[str, str]) -> None:
+        """Set the glossary for a guild."""
+        key = str(guild_id)
+        if key not in self._guild_settings:
+            self._guild_settings[key] = {}
+        self._guild_settings[key]["glossary"] = glossary
+        self._flush_guild_settings()
+
     # ------------------------------------------------------------------
     # Persistence helpers
     # ------------------------------------------------------------------

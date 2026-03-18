@@ -167,6 +167,12 @@ class CalendarConfig:
 
 
 @dataclass(frozen=True)
+class TranscriptGlossaryConfig:
+    enabled: bool = True
+    case_sensitive: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     discord: DiscordConfig
     craig: CraigConfig
@@ -181,6 +187,7 @@ class Config:
     minutes_archive: MinutesArchiveConfig
     export_google_docs: ExportGoogleDocsConfig
     calendar: CalendarConfig
+    transcript_glossary: TranscriptGlossaryConfig
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +208,7 @@ _SECTION_CLASSES: dict[str, type] = {
     "minutes_archive": MinutesArchiveConfig,
     "export_google_docs": ExportGoogleDocsConfig,
     "calendar": CalendarConfig,
+    "transcript_glossary": TranscriptGlossaryConfig,
 }
 
 

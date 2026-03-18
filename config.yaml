@@ -138,6 +138,12 @@ calendar:
   # Maximum retry attempts
   max_retries: 2
 
+transcript_glossary:
+  # Enable dictionary-based correction of Whisper transcription errors
+  enabled: true
+  # Case-sensitive matching (false = case-insensitive, recommended)
+  case_sensitive: false
+
 google_drive:
   # Enable Google Drive folder monitoring
   enabled: true

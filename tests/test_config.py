@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import Config, DiscordConfig, GuildConfig, CalendarConfig, ExportGoogleDocsConfig, load
+from src.config import Config, DiscordConfig, GuildConfig, CalendarConfig, ExportGoogleDocsConfig, TranscriptGlossaryConfig, load
 from src.errors import ConfigError
 
 
@@ -382,6 +382,41 @@ class TestMultiGuild:
 
         cfg = load(str(cfg_path), str(env_path))
         assert cfg.speaker_analytics.enabled is False
+
+    def test_transcript_glossary_default_enabled(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TranscriptGlossaryConfig defaults to enabled, case-insensitive."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.transcript_glossary.enabled is True
+        assert cfg.transcript_glossary.case_sensitive is False
+
+    def test_transcript_glossary_disabled_from_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """transcript_glossary can be disabled via YAML."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            transcript_glossary:
+              enabled: false
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.transcript_glossary.enabled is False
 
     def test_error_mention_role_shared(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """error_mention_role_id is shared across all guilds."""

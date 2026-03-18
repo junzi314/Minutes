@@ -28,6 +28,7 @@ from src.config import (
     PipelineConfig,
     PosterConfig,
     SpeakerAnalyticsConfig,
+    TranscriptGlossaryConfig,
     WhisperConfig,
 )
 from src.detector import DetectedRecording
@@ -66,6 +67,7 @@ def _make_config(**overrides: object) -> Config:
         minutes_archive=MinutesArchiveConfig(),
         export_google_docs=ExportGoogleDocsConfig(),
         calendar=CalendarConfig(),
+        transcript_glossary=TranscriptGlossaryConfig(),
     )
     kwargs.update(overrides)
     return Config(**kwargs)
@@ -653,3 +655,75 @@ class TestPipelineArchive:
             )
 
         mock_archive.store.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Glossary integration
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineGlossary:
+    @pytest.mark.asyncio
+    async def test_glossary_applied_when_enabled(
+        self,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """When glossary is enabled and non-empty, segments are corrected."""
+        cfg = _make_config(transcript_glossary=TranscriptGlossaryConfig(enabled=True))
+        tracks = _make_tracks(tmp_path)
+        mock_channel.guild.id = 1
+
+        # Set a glossary entry
+        state_store.set_guild_glossary(1, {"Hello": "Corrected"})
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            await run_pipeline_from_tracks(
+                tracks=tracks,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+        # The merged transcript passed to generator should contain "Corrected"
+        call_kwargs = mock_generator.generate.call_args.kwargs
+        assert "Corrected" in call_kwargs["transcript"]
+
+    @pytest.mark.asyncio
+    async def test_glossary_skipped_when_disabled(
+        self,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """When glossary is disabled, segments are not modified."""
+        cfg = _make_config(transcript_glossary=TranscriptGlossaryConfig(enabled=False))
+        tracks = _make_tracks(tmp_path)
+        mock_channel.guild.id = 1
+
+        state_store.set_guild_glossary(1, {"Hello": "Corrected"})
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            await run_pipeline_from_tracks(
+                tracks=tracks,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+        # The transcript should still contain original "Hello" not "Corrected"
+        call_kwargs = mock_generator.generate.call_args.kwargs
+        assert "Hello" in call_kwargs["transcript"]
