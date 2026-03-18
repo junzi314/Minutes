@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import Config, DiscordConfig, GuildConfig, CalendarConfig, ExportGoogleDocsConfig, TranscriptGlossaryConfig, load
+from src.config import Config, CalendarConfig, DiscordConfig, ExportGoogleDocsConfig, GuildConfig, GuildDriveConfig, TranscriptGlossaryConfig, load
 from src.errors import ConfigError
 
 
@@ -210,6 +210,76 @@ class TestValidation:
 
         with pytest.raises(ConfigError, match="at least one guild"):
             load(str(cfg_path), str(env_path))
+
+
+class TestGeneratorBackend:
+    def test_backend_default_is_claude(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.generator.backend == "claude"
+
+    def test_invalid_generator_backend(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            generator:
+              backend: "invalid"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="generator.backend"):
+            load(str(cfg_path), str(env_path))
+
+    def test_openai_compat_requires_base_url(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            generator:
+              backend: "openai_compat"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="base_url is required"):
+            load(str(cfg_path), str(env_path))
+
+    def test_openai_compat_no_api_key_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """openai_compat backend does not require ANTHROPIC_API_KEY."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            generator:
+              backend: "openai_compat"
+              base_url: "http://localhost:11434/v1"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.generator.backend == "openai_compat"
+        assert cfg.generator.base_url == "http://localhost:11434/v1"
 
 
 class TestWhisperLanguageValidation:
@@ -436,6 +506,166 @@ class TestMultiGuild:
         cfg = load(str(cfg_path), str(env_path))
         assert cfg.discord.error_mention_role_id == 12345
         assert len(cfg.discord.guilds) == 1
+
+
+class TestPerGuildErrorRole:
+    def test_guild_error_role_parsed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Per-guild error_mention_role_id is parsed from YAML."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  watch_channel_id: 2
+                  output_channel_id: 3
+                  error_mention_role_id: 111
+                - guild_id: 4
+                  watch_channel_id: 5
+                  output_channel_id: 6
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.discord.guilds[0].error_mention_role_id == 111
+        assert cfg.discord.guilds[1].error_mention_role_id is None
+
+    def test_resolve_error_role_guild_level(self) -> None:
+        """resolve_error_role returns guild-level value when set."""
+        g1 = GuildConfig(guild_id=1, watch_channel_id=2, output_channel_id=3, error_mention_role_id=111)
+        g2 = GuildConfig(guild_id=4, watch_channel_id=5, output_channel_id=6)
+        dc = DiscordConfig(token="tok", guilds=(g1, g2), error_mention_role_id=999)
+        assert dc.resolve_error_role(1) == 111
+
+    def test_resolve_error_role_global_fallback(self) -> None:
+        """resolve_error_role falls back to global when guild has no override."""
+        g1 = GuildConfig(guild_id=1, watch_channel_id=2, output_channel_id=3)
+        dc = DiscordConfig(token="tok", guilds=(g1,), error_mention_role_id=999)
+        assert dc.resolve_error_role(1) == 999
+
+    def test_resolve_error_role_both_none(self) -> None:
+        """resolve_error_role returns None when neither guild nor global is set."""
+        g1 = GuildConfig(guild_id=1, watch_channel_id=2, output_channel_id=3)
+        dc = DiscordConfig(token="tok", guilds=(g1,))
+        assert dc.resolve_error_role(1) is None
+
+    def test_resolve_error_role_unknown_guild(self) -> None:
+        """resolve_error_role falls back to global for unknown guild_id."""
+        dc = DiscordConfig(token="tok", guilds=(), error_mention_role_id=999)
+        assert dc.resolve_error_role(999999) == 999
+
+
+class TestPerGuildDrive:
+    def test_guild_drive_config_parsed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Per-guild google_drive sub-section is parsed."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  watch_channel_id: 2
+                  output_channel_id: 3
+                  google_drive:
+                    enabled: true
+                    folder_id: "folder_A"
+                - guild_id: 4
+                  watch_channel_id: 5
+                  output_channel_id: 6
+                  google_drive:
+                    enabled: false
+                - guild_id: 7
+                  watch_channel_id: 8
+                  output_channel_id: 9
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        # Guild 1: Drive enabled with folder_id
+        assert cfg.discord.guilds[0].google_drive is not None
+        assert cfg.discord.guilds[0].google_drive.enabled is True
+        assert cfg.discord.guilds[0].google_drive.folder_id == "folder_A"
+        # Guild 2: Drive disabled
+        assert cfg.discord.guilds[1].google_drive is not None
+        assert cfg.discord.guilds[1].google_drive.enabled is False
+        # Guild 3: No google_drive section
+        assert cfg.discord.guilds[2].google_drive is None
+
+    def test_guild_drive_config_defaults(self) -> None:
+        """GuildDriveConfig has correct defaults."""
+        gd = GuildDriveConfig()
+        assert gd.enabled is True
+        assert gd.folder_id == ""
+
+    def test_guild_config_new_fields_default(self) -> None:
+        """GuildConfig new fields default to None."""
+        g = GuildConfig(guild_id=1, watch_channel_id=2, output_channel_id=3)
+        assert g.error_mention_role_id is None
+        assert g.google_drive is None
+
+    def test_backward_compat_no_new_fields(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Existing config without new fields still works."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  watch_channel_id: 2
+                  output_channel_id: 3
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.discord.guilds[0].error_mention_role_id is None
+        assert cfg.discord.guilds[0].google_drive is None
+
+    def test_guild_drive_enabled_no_folder_id_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Guild Drive enabled with no folder_id (and no global fallback) is rejected."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  watch_channel_id: 2
+                  output_channel_id: 3
+                  google_drive:
+                    enabled: true
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="folder_id"):
+            load(str(cfg_path), str(env_path))
+
+    def test_guild_drive_uses_global_folder_id_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Guild Drive enabled with no folder_id but global folder_id passes validation."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  watch_channel_id: 2
+                  output_channel_id: 3
+                  google_drive:
+                    enabled: true
+            google_drive:
+              enabled: true
+              folder_id: "global_folder"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.discord.guilds[0].google_drive.enabled is True
+        assert cfg.discord.guilds[0].google_drive.folder_id == ""
+        # Global fallback provides the folder_id
+        assert cfg.google_drive.folder_id == "global_folder"
 
 
 class TestWhisperBackend:

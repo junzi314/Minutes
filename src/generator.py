@@ -1,4 +1,4 @@
-"""Minutes generation via Anthropic Claude API."""
+"""Minutes generation via LLM API (Claude or OpenAI-compatible)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ from src.config import GeneratorConfig
 from src.errors import GenerationError
 
 logger = logging.getLogger(__name__)
+
+
+class _ApiRetryable(Exception):
+    """Backend-agnostic retryable API error."""
 
 
 @dataclass
@@ -58,6 +62,7 @@ class MinutesGenerator:
         self._templates: dict[str, str] = {}
         self._prompts_dir: Path | None = None
         self._client: anthropic.Anthropic | None = None
+        self._openai_client: object | None = None
 
     def load(self) -> None:
         """Load the default prompt template and initialise the API client.
@@ -75,11 +80,26 @@ class MinutesGenerator:
         self._templates[path.stem] = path.read_text(encoding="utf-8")
         logger.debug("Loaded prompt template from %s (%d chars)", path, len(self._templates[path.stem]))
 
-        if not self._cfg.api_key:
-            raise GenerationError("ANTHROPIC_API_KEY is not set")
-
-        self._client = anthropic.Anthropic(api_key=self._cfg.api_key)
-        logger.info("MinutesGenerator initialised (model=%s)", self._cfg.model)
+        if self._cfg.backend == "claude":
+            if not self._cfg.api_key:
+                raise GenerationError("ANTHROPIC_API_KEY is not set")
+            self._client = anthropic.Anthropic(api_key=self._cfg.api_key)
+        elif self._cfg.backend == "openai_compat":
+            try:
+                import openai
+            except ImportError:
+                raise GenerationError(
+                    "openai package is required for openai_compat backend. "
+                    "Install with: pip install openai"
+                )
+            self._openai_client = openai.OpenAI(
+                base_url=self._cfg.base_url,
+                api_key=self._cfg.api_key or "not-needed",
+            )
+        logger.info(
+            "MinutesGenerator initialised (backend=%s, model=%s)",
+            self._cfg.backend, self._cfg.model,
+        )
 
     def _load_template(self, name: str) -> str:
         """Load and cache a template by name. Raises GenerationError if not found."""
@@ -119,7 +139,9 @@ class MinutesGenerator:
 
     @property
     def is_loaded(self) -> bool:
-        return bool(self._templates) and self._client is not None
+        return bool(self._templates) and (
+            self._client is not None or self._openai_client is not None
+        )
 
     def render_prompt(
         self,
@@ -155,6 +177,71 @@ class MinutesGenerator:
         for placeholder, value in replacements.items():
             result = result.replace(placeholder, value)
         return result
+
+    async def _call_api(self, prompt: str) -> str:
+        """Dispatch to the configured backend."""
+        if self._cfg.backend == "claude":
+            return await self._call_claude_api(prompt)
+        return await self._call_openai_api(prompt)
+
+    async def _call_claude_api(self, prompt: str) -> str:
+        try:
+            response = await asyncio.to_thread(
+                self._client.messages.create,
+                model=self._cfg.model,
+                max_tokens=self._cfg.max_tokens,
+                temperature=self._cfg.temperature,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text
+            logger.info(
+                "Claude: %d input tokens, %d output tokens",
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            )
+            return text
+        except anthropic.RateLimitError as exc:
+            raise _ApiRetryable(str(exc)) from exc
+        except anthropic.APIStatusError as exc:
+            if 400 <= exc.status_code < 500 and exc.status_code != 429:
+                raise GenerationError(
+                    f"Claude API client error (HTTP {exc.status_code}): {exc.message}"
+                ) from exc
+            raise _ApiRetryable(str(exc)) from exc
+        except anthropic.APIConnectionError as exc:
+            raise _ApiRetryable(str(exc)) from exc
+
+    async def _call_openai_api(self, prompt: str) -> str:
+        import openai
+
+        try:
+            response = await asyncio.to_thread(
+                self._openai_client.chat.completions.create,
+                model=self._cfg.model,
+                max_tokens=self._cfg.max_tokens,
+                temperature=self._cfg.temperature,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            if not response.choices:
+                raise GenerationError("API returned empty response (no choices)")
+            text = response.choices[0].message.content or ""
+            if response.usage:
+                logger.info(
+                    "OpenAI-compat: %d input tokens, %d output tokens",
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+            return text
+        except openai.RateLimitError as exc:
+            raise _ApiRetryable(str(exc)) from exc
+        except openai.APIStatusError as exc:
+            if 400 <= exc.status_code < 500 and exc.status_code != 429:
+                raise GenerationError(
+                    f"API client error (HTTP {exc.status_code}): {exc.message}"
+                ) from exc
+            raise _ApiRetryable(str(exc)) from exc
+        except openai.APIConnectionError as exc:
+            raise _ApiRetryable(str(exc)) from exc
 
     async def generate(
         self,
@@ -195,54 +282,23 @@ class MinutesGenerator:
             try:
                 t0 = time.monotonic()
                 logger.info(
-                    "Calling Claude API (attempt %d/%d, model=%s)",
+                    "Calling %s API (attempt %d/%d, model=%s)",
+                    self._cfg.backend,
                     attempt,
                     max_attempts,
                     self._cfg.model,
                 )
-
-                # Run synchronous Anthropic call in a thread to avoid
-                # blocking the async event loop.
-                response = await asyncio.to_thread(
-                    self._client.messages.create,
-                    model=self._cfg.model,
-                    max_tokens=self._cfg.max_tokens,
-                    temperature=self._cfg.temperature,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-
+                text = await self._call_api(prompt)
                 elapsed = time.monotonic() - t0
-                text = response.content[0].text
                 logger.info(
-                    "Claude API responded in %.1fs (%d chars, %d input tokens, %d output tokens)",
-                    elapsed,
-                    len(text),
-                    response.usage.input_tokens,
-                    response.usage.output_tokens,
+                    "API responded in %.1fs (%d chars)", elapsed, len(text),
                 )
                 return text
 
-            except anthropic.RateLimitError as exc:
+            except _ApiRetryable as exc:
                 last_exc = exc
                 logger.warning(
-                    "Rate limited on attempt %d/%d: %s",
-                    attempt, max_attempts, exc,
-                )
-            except anthropic.APIStatusError as exc:
-                last_exc = exc
-                # 4xx (except 429) are not retryable
-                if 400 <= exc.status_code < 500 and exc.status_code != 429:
-                    raise GenerationError(
-                        f"Claude API client error (HTTP {exc.status_code}): {exc.message}"
-                    ) from exc
-                logger.warning(
-                    "API error on attempt %d/%d (HTTP %d): %s",
-                    attempt, max_attempts, exc.status_code, exc.message,
-                )
-            except anthropic.APIConnectionError as exc:
-                last_exc = exc
-                logger.warning(
-                    "Connection error on attempt %d/%d: %s",
+                    "Retryable error on attempt %d/%d: %s",
                     attempt, max_attempts, exc,
                 )
 
@@ -253,5 +309,5 @@ class MinutesGenerator:
                 await asyncio.sleep(delay)
 
         raise GenerationError(
-            f"Claude API failed after {max_attempts} attempts: {last_exc}"
+            f"API failed after {max_attempts} attempts: {last_exc}"
         ) from last_exc

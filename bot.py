@@ -19,7 +19,7 @@ import aiohttp
 import discord
 
 from src.audio_source import SpeakerAudio
-from src.config import Config, GuildConfig, load
+from src.config import Config, GoogleDriveConfig, GuildConfig, load
 from src.detector import DetectedRecording, RECORDING_URL_PATTERN, parse_recording_ended
 from src.drive_watcher import DriveWatcher
 from src.errors import MinutesBotError
@@ -135,7 +135,7 @@ class MinutesBot(discord.Client):
         self.archive = archive
         self.exporter = exporter
         self.http_session: aiohttp.ClientSession | None = None
-        self.drive_watcher: DriveWatcher | None = None
+        self.drive_watchers: dict[int, DriveWatcher] = {}
         self._start_time = time.monotonic()
         super().__init__(**kwargs)
         self.tree = discord.app_commands.CommandTree(self)
@@ -147,8 +147,8 @@ class MinutesBot(discord.Client):
 
     async def close(self) -> None:
         """Clean up resources on shutdown."""
-        if self.drive_watcher is not None:
-            self.drive_watcher.stop()
+        for watcher in self.drive_watchers.values():
+            watcher.stop()
         if self.archive is not None:
             self.archive.close()
         if self.http_session and not self.http_session.closed:
@@ -180,48 +180,8 @@ class MinutesBot(discord.Client):
                 gcfg.guild_id,
             )
 
-        # Start Google Drive watcher if enabled (uses first guild's output channel)
-        if self.cfg.google_drive.enabled:
-            first_guild = self.cfg.discord.guilds[0] if self.cfg.discord.guilds else None
-            output_channel = (
-                self._get_output_channel_for_guild(first_guild)
-                if first_guild else None
-            )
-            if output_channel is None:
-                logger.error(
-                    "Output channel not found for Drive watcher (first guild), Drive watcher will not start",
-                )
-            else:
-                async def _on_drive_tracks(
-                    tracks: list[SpeakerAudio],
-                    source_label: str,
-                    tmp_dir: Path,
-                ) -> None:
-                    template_name = self.resolve_template(first_guild.guild_id)
-                    await run_pipeline_from_tracks(
-                        tracks=tracks,
-                        cfg=self.cfg,
-                        transcriber=self.transcriber,
-                        generator=self.generator,
-                        output_channel=output_channel,
-                        state_store=self.state_store,
-                        source_label=source_label,
-                        template_name=template_name,
-                        archive=self.archive,
-                        exporter=self.exporter,
-                    )
-
-                self.drive_watcher = DriveWatcher(
-                    cfg=self.cfg.google_drive,
-                    state_store=self.state_store,
-                    on_new_tracks=_on_drive_tracks,
-                )
-                self.drive_watcher.start()
-                logger.info(
-                    "Google Drive watcher started (output to channel %d in guild %d)",
-                    first_guild.output_channel_id,
-                    first_guild.guild_id,
-                )
+        # Start per-guild Google Drive watchers
+        self._start_drive_watchers()
 
     def resolve_template(self, guild_id: int) -> str:
         """Resolve template name for a guild.
@@ -249,6 +209,88 @@ class MinutesBot(discord.Client):
         if isinstance(ch, (discord.TextChannel, discord.ForumChannel)):
             return ch
         return None
+
+    def _start_drive_watchers(self) -> None:
+        """Start per-guild Google Drive watchers based on config.
+
+        For each guild, resolve Drive settings (guild-level overrides or
+        global fallback) and create a DriveWatcher with a callback bound
+        to that guild's output channel.
+        """
+        global_drive = self.cfg.google_drive
+
+        for gcfg in self.cfg.discord.guilds:
+            # Resolve per-guild Drive config
+            guild_drive = gcfg.google_drive
+            if guild_drive is not None:
+                enabled = guild_drive.enabled
+                folder_id = guild_drive.folder_id or global_drive.folder_id
+            else:
+                enabled = global_drive.enabled
+                folder_id = global_drive.folder_id
+
+            if not enabled or not folder_id:
+                continue
+
+            output_channel = self._get_output_channel_for_guild(gcfg)
+            if output_channel is None:
+                logger.error(
+                    "Output channel %d not found for guild %d, Drive watcher will not start",
+                    gcfg.output_channel_id,
+                    gcfg.guild_id,
+                )
+                continue
+
+            # Build a DriveWatcher config using guild folder_id + global shared settings
+            watcher_cfg = GoogleDriveConfig(
+                enabled=True,
+                credentials_path=global_drive.credentials_path,
+                folder_id=folder_id,
+                file_pattern=global_drive.file_pattern,
+                poll_interval_sec=global_drive.poll_interval_sec,
+            )
+
+            # Closure captures gcfg and output_channel for this guild
+            _guild_cfg = gcfg
+            _out_ch = output_channel
+
+            async def _on_drive_tracks(
+                tracks: list[SpeakerAudio],
+                source_label: str,
+                tmp_dir: Path,
+                *,
+                _gcfg: GuildConfig = _guild_cfg,
+                _channel: OutputChannel = _out_ch,
+            ) -> None:
+                template_name = self.resolve_template(_gcfg.guild_id)
+                error_role = self.cfg.discord.resolve_error_role(_gcfg.guild_id)
+                await run_pipeline_from_tracks(
+                    tracks=tracks,
+                    cfg=self.cfg,
+                    transcriber=self.transcriber,
+                    generator=self.generator,
+                    output_channel=_channel,
+                    state_store=self.state_store,
+                    source_label=source_label,
+                    template_name=template_name,
+                    archive=self.archive,
+                    exporter=self.exporter,
+                    error_mention_role_id=error_role,
+                )
+
+            watcher = DriveWatcher(
+                cfg=watcher_cfg,
+                state_store=self.state_store,
+                on_new_tracks=_on_drive_tracks,
+            )
+            watcher.start()
+            self.drive_watchers[gcfg.guild_id] = watcher
+            logger.info(
+                "Google Drive watcher started for guild %d (folder=%s, output=%d)",
+                gcfg.guild_id,
+                folder_id,
+                gcfg.output_channel_id,
+            )
 
     async def on_raw_message_update(
         self, payload: discord.RawMessageUpdateEvent
@@ -318,6 +360,7 @@ class MinutesBot(discord.Client):
             return
 
         template_name = self.resolve_template(recording.guild_id)
+        error_role = self.cfg.discord.resolve_error_role(recording.guild_id)
 
         task = asyncio.create_task(
             run_pipeline(
@@ -331,6 +374,7 @@ class MinutesBot(discord.Client):
                 template_name=template_name,
                 archive=self.archive,
                 exporter=self.exporter,
+                error_mention_role_id=error_role,
             ),
             name=f"pipeline-{rec_id}",
         )
@@ -445,25 +489,35 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
 
     @group.command(name="drive-status", description="Show Google Drive watcher status")
     async def minutes_drive_status(interaction: discord.Interaction) -> None:
+        guild_id = interaction.guild_id or 0
         gdcfg = client.cfg.google_drive
-        watcher = client.drive_watcher
+        watcher = client.drive_watchers.get(guild_id)
 
-        if not gdcfg.enabled:
-            await interaction.response.send_message(
-                "Google Drive watcher is **disabled** in config.", ephemeral=True,
+        lines: list[str] = []
+
+        if watcher is not None:
+            running = watcher.is_running
+            # Get folder_id from the watcher's config
+            guild_cfg = client.cfg.discord.get_guild(guild_id)
+            guild_drive = guild_cfg.google_drive if guild_cfg else None
+            folder_id = (
+                (guild_drive.folder_id if guild_drive and guild_drive.folder_id else None)
+                or gdcfg.folder_id
             )
-            return
+            lines.append(f"**このギルドのDrive監視**: {'running' if running else 'stopped'}")
+            lines.append(f"**Folder ID**: `{folder_id or '(not set)'}`")
+        else:
+            lines.append("**このギルドのDrive監視**: 無効")
 
-        running = watcher is not None and watcher.is_running
-        processed_count = client.state_store.processing_count
+        # Global info
+        total_running = sum(1 for w in client.drive_watchers.values() if w.is_running)
+        total_watchers = len(client.drive_watchers)
+        if total_watchers > 0:
+            lines.append(f"**全体**: {total_running}/{total_watchers} ギルド稼働中")
+        lines.append(f"**File pattern**: `{gdcfg.file_pattern}`")
+        lines.append(f"**Poll interval**: {gdcfg.poll_interval_sec}s")
+        lines.append(f"**Processed files**: {client.state_store.processing_count}")
 
-        lines = [
-            f"**Drive watcher**: {'running' if running else 'stopped'}",
-            f"**Folder ID**: `{gdcfg.folder_id or '(not set)'}`",
-            f"**File pattern**: `{gdcfg.file_pattern}`",
-            f"**Poll interval**: {gdcfg.poll_interval_sec}s",
-            f"**Processed files**: {processed_count}",
-        ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     @group.command(name="template-list", description="Show available templates")

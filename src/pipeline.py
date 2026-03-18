@@ -54,6 +54,7 @@ async def run_pipeline_from_tracks(
     template_name: str = "minutes",
     archive: MinutesArchive | None = None,
     exporter: object | None = None,
+    error_mention_role_id: int | None = None,
 ) -> None:
     """Execute stages 2-5 (transcribe -> merge -> generate -> post) on pre-downloaded tracks.
 
@@ -272,7 +273,7 @@ async def run_pipeline_from_tracks(
             channel=output_channel,
             error_message=str(exc),
             stage=exc.stage,
-            error_mention_role_id=cfg.discord.error_mention_role_id,
+            error_mention_role_id=error_mention_role_id,
         )
         raise
 
@@ -292,7 +293,7 @@ async def run_pipeline_from_tracks(
             channel=output_channel,
             error_message=str(exc),
             stage="unknown",
-            error_mention_role_id=cfg.discord.error_mention_role_id,
+            error_mention_role_id=error_mention_role_id,
         )
         raise
 
@@ -308,6 +309,7 @@ async def run_pipeline(
     template_name: str = "minutes",
     archive: MinutesArchive | None = None,
     exporter: object | None = None,
+    error_mention_role_id: int | None = None,
 ) -> None:
     """Execute the full pipeline from Craig download through Discord posting."""
     status_msg: discord.Message | None = None
@@ -350,6 +352,7 @@ async def run_pipeline(
                 template_name=template_name,
                 archive=archive,
                 exporter=exporter,
+                error_mention_role_id=error_mention_role_id,
             )
 
     except MinutesBotError as exc:
@@ -364,7 +367,7 @@ async def run_pipeline(
                 channel=output_channel,
                 error_message=str(exc),
                 stage=exc.stage,
-                error_mention_role_id=cfg.discord.error_mention_role_id,
+                error_mention_role_id=error_mention_role_id,
             )
         raise
 
@@ -378,7 +381,7 @@ async def run_pipeline(
             channel=output_channel,
             error_message=str(exc),
             stage="unknown",
-            error_mention_role_id=cfg.discord.error_mention_role_id,
+            error_mention_role_id=error_mention_role_id,
         )
         raise
 

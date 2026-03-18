@@ -24,6 +24,8 @@ VALID_WHISPER_MODELS = frozenset({
     "large-v3-turbo",
 })
 
+VALID_GENERATOR_BACKENDS = frozenset({"claude", "openai_compat"})
+
 VALID_WHISPER_LANGUAGES = frozenset({
     "auto",
     "ja", "en", "zh", "ko",
@@ -37,6 +39,14 @@ VALID_WHISPER_LANGUAGES = frozenset({
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class GuildDriveConfig:
+    """Per-guild Google Drive overrides (folder_id + enabled)."""
+
+    enabled: bool = True
+    folder_id: str = ""
+
+
+@dataclass(frozen=True)
 class GuildConfig:
     """Per-guild configuration (guild ID, watch channel, output channel)."""
 
@@ -44,6 +54,8 @@ class GuildConfig:
     watch_channel_id: int
     output_channel_id: int
     template: str = "minutes"
+    error_mention_role_id: int | None = None
+    google_drive: GuildDriveConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,13 @@ class DiscordConfig:
     def get_guild(self, guild_id: int) -> GuildConfig | None:
         """Look up guild config by guild_id (O(1)). Returns None if not found."""
         return self._guild_map.get(guild_id)  # type: ignore[attr-defined]
+
+    def resolve_error_role(self, guild_id: int) -> int | None:
+        """Resolve error mention role ID: guild-level then global fallback."""
+        guild_cfg = self.get_guild(guild_id)
+        if guild_cfg and guild_cfg.error_mention_role_id is not None:
+            return guild_cfg.error_mention_role_id
+        return self.error_mention_role_id
 
 
 @dataclass(frozen=True)
@@ -102,6 +121,8 @@ class GeneratorConfig:
     temperature: float = 0.3
     prompt_template_path: str = "prompts/minutes.txt"
     max_retries: int = 2
+    backend: str = "claude"
+    base_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -316,11 +337,21 @@ def _build_discord_section(yaml_section: dict) -> DiscordConfig:
         for i, entry in enumerate(raw_guilds):
             if not isinstance(entry, dict):
                 raise ConfigError(f"discord.guilds[{i}] must be a mapping")
+            # Parse per-guild google_drive sub-section
+            gd_raw = entry.get("google_drive")
+            guild_drive: GuildDriveConfig | None = None
+            if isinstance(gd_raw, dict):
+                guild_drive = GuildDriveConfig(
+                    enabled=gd_raw.get("enabled", True),
+                    folder_id=gd_raw.get("folder_id", ""),
+                )
             guild_configs.append(GuildConfig(
                 guild_id=entry.get("guild_id", 0),
                 watch_channel_id=entry.get("watch_channel_id", 0),
                 output_channel_id=entry.get("output_channel_id", 0),
                 template=entry.get("template", "minutes"),
+                error_mention_role_id=entry.get("error_mention_role_id"),
+                google_drive=guild_drive,
             ))
         guilds = tuple(guild_configs)
     elif "guild_id" in yaml_section:
@@ -378,6 +409,15 @@ def _validate(cfg: Config) -> None:
         )
 
     # Generator
+    if cfg.generator.backend not in VALID_GENERATOR_BACKENDS:
+        errors.append(
+            f"generator.backend '{cfg.generator.backend}' is not valid. "
+            f"Choose from: {sorted(VALID_GENERATOR_BACKENDS)}"
+        )
+    if cfg.generator.backend == "openai_compat" and not cfg.generator.base_url:
+        errors.append(
+            "generator.base_url is required when generator.backend is 'openai_compat'"
+        )
     if not (0.0 <= cfg.generator.temperature <= 1.0):
         errors.append("generator.temperature must be between 0.0 and 1.0")
     if cfg.generator.max_tokens < 1:
@@ -437,6 +477,17 @@ def _validate(cfg: Config) -> None:
             errors.append("calendar.calendar_id is required when calendar.enabled is true")
         if cfg.calendar.match_tolerance_minutes < 0:
             errors.append("calendar.match_tolerance_minutes must be >= 0")
+
+    # Per-guild Google Drive validation
+    for i, guild in enumerate(cfg.discord.guilds):
+        if guild.google_drive and guild.google_drive.enabled:
+            # folder_id: guild-level or global fallback
+            folder_id = guild.google_drive.folder_id or cfg.google_drive.folder_id
+            if not folder_id:
+                errors.append(
+                    f"discord.guilds[{i}].google_drive.folder_id is required "
+                    f"when enabled (no global fallback set either)"
+                )
 
     if errors:
         raise ConfigError("Configuration validation failed:\n  - " + "\n  - ".join(errors))
