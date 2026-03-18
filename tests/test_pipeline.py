@@ -163,7 +163,7 @@ def mock_generator() -> MagicMock:
     g = MagicMock()
     g.is_loaded = True
     g.generate = AsyncMock(
-        return_value="# 会議議事録\n## 要約\nテスト会議\n## 決定事項\n- テスト"
+        return_value="# 会議議事録\n## まとめ\nテスト会議\n## 推奨される次のステップ\n- [ ] テスト"
     )
     return g
 
@@ -526,6 +526,81 @@ class TestPipelineSpeakerAnalytics:
         mock_post.assert_called_once()
         call_kwargs = mock_post.call_args.kwargs
         assert call_kwargs["speaker_stats"] is None
+
+
+class TestPipelineTranscriptAttachment:
+    @pytest.mark.asyncio
+    async def test_transcript_md_passed_when_enabled(
+        self,
+        recording: DetectedRecording,
+        mock_session: MagicMock,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """When include_transcript=True, transcript_md is passed to post_minutes."""
+        cfg = _make_config(poster=PosterConfig(include_transcript=True))
+        tracks = _make_tracks(tmp_path)
+
+        with (
+            patch("src.pipeline._stage_download", new_callable=AsyncMock) as mock_dl,
+            patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post,
+        ):
+            mock_dl.return_value = tracks
+            mock_post.return_value = MagicMock(id=1)
+
+            await run_pipeline(
+                recording=recording,
+                session=mock_session,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs["transcript_md"] is not None
+        assert "# 文字起こし" in call_kwargs["transcript_md"]
+
+    @pytest.mark.asyncio
+    async def test_transcript_md_none_when_disabled(
+        self,
+        recording: DetectedRecording,
+        mock_session: MagicMock,
+        mock_channel: MagicMock,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """When include_transcript=False (default), transcript_md is None."""
+        cfg = _make_config(poster=PosterConfig(include_transcript=False))
+        tracks = _make_tracks(tmp_path)
+
+        with (
+            patch("src.pipeline._stage_download", new_callable=AsyncMock) as mock_dl,
+            patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post,
+        ):
+            mock_dl.return_value = tracks
+            mock_post.return_value = MagicMock(id=1)
+
+            await run_pipeline(
+                recording=recording,
+                session=mock_session,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args.kwargs
+        assert call_kwargs["transcript_md"] is None
 
 
 class TestTranscriptHash:

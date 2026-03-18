@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from src.config import MergerConfig
 from src.transcriber import Segment
@@ -118,7 +119,6 @@ def format_transcript_markdown(
     ]
 
     # Parse [MM:SS] or [HH:MM:SS] prefix to total seconds
-    import re
     ts_pattern = re.compile(r"^\[(?:(\d+):)?(\d+):(\d+)\]\s*(.+)$")
 
     current_section_start: int | None = None
