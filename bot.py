@@ -643,11 +643,11 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
             )
             return
         embed = discord.Embed(title="用語辞書", color=0x5865F2)
-        for wrong, correct in list(glossary.items())[:25]:
+        for wrong, correct in list(glossary.items())[-25:]:
             embed.add_field(name=wrong, value=f"→ {correct}", inline=True)
         footer = f"{len(glossary)}件のエントリ"
         if len(glossary) > 25:
-            footer += f"（先頭25件を表示）"
+            footer += "（直近25件を表示）"
         embed.set_footer(text=footer)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
