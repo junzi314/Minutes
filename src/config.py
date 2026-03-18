@@ -24,6 +24,8 @@ VALID_WHISPER_MODELS = frozenset({
     "large-v3-turbo",
 })
 
+VALID_GENERATOR_BACKENDS = frozenset({"claude", "openai_compat"})
+
 VALID_WHISPER_LANGUAGES = frozenset({
     "auto",
     "ja", "en", "zh", "ko",
@@ -119,6 +121,8 @@ class GeneratorConfig:
     temperature: float = 0.3
     prompt_template_path: str = "prompts/minutes.txt"
     max_retries: int = 2
+    backend: str = "claude"
+    base_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -397,6 +401,15 @@ def _validate(cfg: Config) -> None:
         )
 
     # Generator
+    if cfg.generator.backend not in VALID_GENERATOR_BACKENDS:
+        errors.append(
+            f"generator.backend '{cfg.generator.backend}' is not valid. "
+            f"Choose from: {sorted(VALID_GENERATOR_BACKENDS)}"
+        )
+    if cfg.generator.backend == "openai_compat" and not cfg.generator.base_url:
+        errors.append(
+            "generator.base_url is required when generator.backend is 'openai_compat'"
+        )
     if not (0.0 <= cfg.generator.temperature <= 1.0):
         errors.append("generator.temperature must be between 0.0 and 1.0")
     if cfg.generator.max_tokens < 1:

@@ -13,8 +13,8 @@ from src.errors import GenerationError
 from src.generator import MinutesGenerator, TemplateInfo, _parse_template_metadata
 
 
-def _make_cfg(tmp_path: Path, api_key: str = "sk-test") -> GeneratorConfig:
-    """Create a GeneratorConfig with a real template file."""
+def _write_template(tmp_path: Path) -> Path:
+    """Write a template file and return its path."""
     template = tmp_path / "minutes.txt"
     template.write_text(
         "# name: Standard\n# description: Standard template\n"
@@ -23,7 +23,13 @@ def _make_cfg(tmp_path: Path, api_key: str = "sk-test") -> GeneratorConfig:
         "Transcript:\n{transcript}",
         encoding="utf-8",
     )
-    return GeneratorConfig(
+    return template
+
+
+def _make_cfg(tmp_path: Path, api_key: str = "sk-test", **kwargs) -> GeneratorConfig:
+    """Create a GeneratorConfig with a real template file."""
+    template = _write_template(tmp_path)
+    defaults = dict(
         api_key=api_key,
         model="claude-sonnet-4-5-20250929",
         max_tokens=1024,
@@ -31,6 +37,8 @@ def _make_cfg(tmp_path: Path, api_key: str = "sk-test") -> GeneratorConfig:
         prompt_template_path=str(template),
         max_retries=2,
     )
+    defaults.update(kwargs)
+    return GeneratorConfig(**defaults)
 
 
 class TestGeneratorLoad:
@@ -247,6 +255,135 @@ class TestParseTemplateMetadata:
         display, desc = _parse_template_metadata(p)
         assert display == "Only Name"
         assert desc == ""
+
+
+class TestOpenAICompat:
+    def test_load_openai_compat(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path, api_key="", backend="openai_compat",
+                        base_url="http://localhost:11434/v1")
+        gen = MinutesGenerator(cfg)
+        with patch("openai.OpenAI") as mock_cls:
+            gen.load()
+            mock_cls.assert_called_once_with(
+                base_url="http://localhost:11434/v1",
+                api_key="not-needed",
+            )
+        assert gen.is_loaded
+
+    def test_load_openai_compat_missing_package(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path, api_key="", backend="openai_compat",
+                        base_url="http://localhost:11434/v1")
+        gen = MinutesGenerator(cfg)
+        with patch.dict("sys.modules", {"openai": None}):
+            with pytest.raises(GenerationError, match="pip install openai"):
+                gen.load()
+
+    @pytest.mark.asyncio
+    async def test_generate_openai_compat_success(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path, api_key="", backend="openai_compat",
+                        base_url="http://localhost:11434/v1")
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock(message=MagicMock(content="# 議事録\nテスト"))]
+        mock_response.usage = MagicMock(prompt_tokens=100, completion_tokens=50)
+        gen._openai_client.chat.completions.create = MagicMock(return_value=mock_response)
+
+        result = await gen.generate("transcript", "date", "speakers")
+        assert "議事録" in result
+
+    @pytest.mark.asyncio
+    async def test_generate_openai_compat_rate_limit(self, tmp_path: Path) -> None:
+        import openai as openai_mod
+
+        cfg = _make_cfg(tmp_path, api_key="", backend="openai_compat",
+                        base_url="http://localhost:11434/v1")
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock(message=MagicMock(content="Success"))]
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+
+        rate_exc = openai_mod.RateLimitError(
+            message="rate limited",
+            response=MagicMock(status_code=429, headers={}),
+            body=None,
+        )
+
+        gen._openai_client.chat.completions.create = MagicMock(
+            side_effect=[rate_exc, mock_response]
+        )
+
+        result = await gen.generate("transcript", "date", "speakers")
+        assert result == "Success"
+        assert gen._openai_client.chat.completions.create.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_generate_openai_compat_client_error(self, tmp_path: Path) -> None:
+        import openai as openai_mod
+
+        cfg = _make_cfg(tmp_path, api_key="", backend="openai_compat",
+                        base_url="http://localhost:11434/v1")
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        client_exc = openai_mod.APIStatusError(
+            message="bad request",
+            response=MagicMock(status_code=400, headers={}),
+            body=None,
+        )
+        gen._openai_client.chat.completions.create = MagicMock(side_effect=client_exc)
+
+        with pytest.raises(GenerationError, match="client error"):
+            await gen.generate("transcript", "date", "speakers")
+
+    @pytest.mark.asyncio
+    async def test_generate_openai_compat_connection_error(self, tmp_path: Path) -> None:
+        import openai as openai_mod
+
+        cfg = _make_cfg(tmp_path, api_key="", backend="openai_compat",
+                        base_url="http://localhost:11434/v1")
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        conn_exc = openai_mod.APIConnectionError(request=MagicMock())
+        gen._openai_client.chat.completions.create = MagicMock(side_effect=conn_exc)
+
+        with pytest.raises(GenerationError, match="failed after"):
+            await gen.generate("transcript", "date", "speakers")
+
+        assert gen._openai_client.chat.completions.create.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_generate_openai_compat_empty_response(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path, api_key="", backend="openai_compat",
+                        base_url="http://localhost:11434/v1")
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        mock_response = MagicMock()
+        mock_response.choices = []
+        gen._openai_client.chat.completions.create = MagicMock(return_value=mock_response)
+
+        with pytest.raises(GenerationError, match="empty response"):
+            await gen.generate("transcript", "date", "speakers")
+
+    @pytest.mark.asyncio
+    async def test_generate_openai_compat_no_usage(self, tmp_path: Path) -> None:
+        cfg = _make_cfg(tmp_path, api_key="", backend="openai_compat",
+                        base_url="http://localhost:11434/v1")
+        gen = MinutesGenerator(cfg)
+        gen.load()
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock(message=MagicMock(content="Result"))]
+        mock_response.usage = None
+        gen._openai_client.chat.completions.create = MagicMock(return_value=mock_response)
+
+        result = await gen.generate("transcript", "date", "speakers")
+        assert result == "Result"
 
 
 class TestLoadTemplate:

@@ -212,6 +212,76 @@ class TestValidation:
             load(str(cfg_path), str(env_path))
 
 
+class TestGeneratorBackend:
+    def test_backend_default_is_claude(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.generator.backend == "claude"
+
+    def test_invalid_generator_backend(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            generator:
+              backend: "invalid"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="generator.backend"):
+            load(str(cfg_path), str(env_path))
+
+    def test_openai_compat_requires_base_url(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            generator:
+              backend: "openai_compat"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="base_url is required"):
+            load(str(cfg_path), str(env_path))
+
+    def test_openai_compat_no_api_key_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """openai_compat backend does not require ANTHROPIC_API_KEY."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 1
+              watch_channel_id: 2
+              output_channel_id: 3
+            generator:
+              backend: "openai_compat"
+              base_url: "http://localhost:11434/v1"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.generator.backend == "openai_compat"
+        assert cfg.generator.base_url == "http://localhost:11434/v1"
+
+
 class TestWhisperLanguageValidation:
     def test_invalid_whisper_language_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Invalid language code should raise ConfigError."""

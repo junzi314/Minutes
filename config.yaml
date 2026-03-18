@@ -71,6 +71,9 @@ merger:
   gap_merge_threshold_sec: 1.0
 
 generator:
+  # Backend: "claude" (default) or "openai_compat" (Ollama/vLLM/llama.cpp)
+  # backend: "openai_compat"
+  # base_url: "http://localhost:11434/v1"
   # Anthropic model for minutes generation
   model: "claude-sonnet-4-5-20250929"
   # Maximum tokens in the generated response
