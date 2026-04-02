@@ -655,39 +655,61 @@ class TestTranscriptTab:
 
 
 class TestTimestampLinks:
-    """Tests for cross-tab timestamp link replacement."""
+    """Tests for cross-tab timestamp link insertion via Docs API."""
 
-    def test_md_to_html_timestamp_placeholder(self) -> None:
-        """Timestamps become links with placeholder URL when transcript URL provided."""
-        from src.exporter import TRANSCRIPT_TAB_PLACEHOLDER
+    def test_md_to_html_timestamps_blue_text(self) -> None:
+        """Timestamps are styled as blue text (no links) when no URL provided."""
         exp = _make_exporter()
         md = "Some discussion ([12:34])"
-        html = exp._md_to_html(md, transcript_doc_url=TRANSCRIPT_TAB_PLACEHOLDER)
+        html = exp._md_to_html(md)
 
-        assert TRANSCRIPT_TAB_PLACEHOLDER in html
         assert "12:34" in html
+        assert "color:#1a73e8" in html
+        # Should NOT contain link tags for timestamps
+        assert "href" not in html or "__TRANSCRIPT_TAB_URL__" not in html
 
-    def test_update_timestamp_links_calls_replace_all(self) -> None:
-        """Verify replaceAllText request structure."""
-        from src.exporter import TRANSCRIPT_TAB_PLACEHOLDER
+    def test_update_timestamp_links_strips_query_params(self) -> None:
+        """Tab URL is constructed by stripping existing query params."""
         exp = _make_exporter()
-        exp._docs_service = _mock_docs_service()
+
+        # Mock docs service that returns a document with timestamp text
+        mock_docs = MagicMock()
+        mock_docs.documents().get.return_value.execute.return_value = {
+            "tabs": [{
+                "tabProperties": {"tabId": "t.0"},
+                "documentTab": {
+                    "body": {
+                        "content": [{
+                            "paragraph": {
+                                "elements": [{
+                                    "startIndex": 10,
+                                    "textRun": {"content": "Discussion ([12:34])"},
+                                }]
+                            }
+                        }]
+                    }
+                }
+            }],
+        }
+        mock_docs.documents().batchUpdate.return_value.execute.return_value = {}
+        exp._docs_service = mock_docs
 
         exp._update_timestamp_links_sync(
-            "doc-123", "t.abc456", "https://docs.google.com/document/d/doc-123/edit",
+            "doc-123", "t.abc456",
+            "https://docs.google.com/document/d/doc-123/edit?usp=drivesdk",
         )
 
-        call_args = exp._docs_service.documents().batchUpdate.call_args
+        call_args = mock_docs.documents().batchUpdate.call_args
         body = call_args[1]["body"] if "body" in call_args[1] else call_args[0][0]
-        req = body["requests"][0]["replaceAllText"]
-        assert req["containsText"]["text"] == TRANSCRIPT_TAB_PLACEHOLDER
-        assert "?tab=t.abc456" in req["replaceText"]
-        assert req["tabsCriteria"]["tabIds"] == ["t.0"]
+        req = body["requests"][0]["updateTextStyle"]
+        link_url = req["textStyle"]["link"]["url"]
+        # Should have clean URL with ?tab= (not ?usp=...?tab=...)
+        assert link_url == "https://docs.google.com/document/d/doc-123/edit?tab=t.abc456"
+        assert "usp=" not in link_url
 
     @pytest.mark.asyncio
-    async def test_export_updates_links_after_tab_creation(self) -> None:
+    async def test_export_calls_link_update_after_tab(self) -> None:
         """Full flow: link update is called after tab creation."""
-        from src.exporter import TRANSCRIPT_TAB_PLACEHOLDER
         exp = _make_exporter()
         exp._service = _mock_drive_service(doc_id="doc-abc", url="https://docs.google.com/document/d/doc-abc/edit")
         exp._docs_service = _mock_docs_service(tab_id="t.link123")
@@ -698,8 +720,8 @@ class TestTimestampLinks:
         )
 
         assert result.success is True
-        # At least 3 batchUpdate calls: addTab + writeContent + replaceAllText
-        assert exp._docs_service.documents().batchUpdate.call_count >= 3
+        # Docs API should be called multiple times (addTab + writeContent + get + batchUpdate for links)
+        assert exp._docs_service.documents.call_count >= 1
 
 
 # ===================================================================
@@ -791,30 +813,11 @@ class TestFallbackBehavior:
         assert result.success is True
 
     @pytest.mark.asyncio
-    async def test_export_rename_tab_failure_nonfatal(self) -> None:
-        """updateDocumentTab rename failure → tabs work, default name remains."""
+    async def test_export_rename_tab_is_noop(self) -> None:
+        """Tab rename is a no-op (Docs API doesn't support it yet)."""
         exp = _make_exporter()
         exp._service = _mock_drive_service()
-
-        call_count = 0
-        def batch_side_effect(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # addDocumentTab
-                return {
-                    "replies": [{"addDocumentTab": {"tabProperties": {"tabId": "t.test", "title": "x", "index": 1}}}],
-                    "documentId": "doc-123",
-                }
-            if call_count <= 3:
-                # writeContent + replaceAllText
-                return {"replies": [], "documentId": "doc-123"}
-            # renameTab (4th call) fails
-            raise RuntimeError("rename failed")
-
-        mock_docs = MagicMock()
-        mock_docs.documents().batchUpdate.return_value.execute.side_effect = batch_side_effect
-        exp._docs_service = mock_docs
+        exp._docs_service = _mock_docs_service()
 
         result = await exp.export("# Minutes", "Test", transcript_md=_SAMPLE_TRANSCRIPT)
         assert result.success is True

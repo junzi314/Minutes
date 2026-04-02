@@ -173,6 +173,28 @@ async def run_pipeline_from_tracks(
             else:
                 logger.info("Using cached minutes for source=%s", source_label)
 
+            # Export to Google Docs (fault-tolerant, before Discord post to get URL)
+            google_docs_url: str | None = None
+            if exporter is not None and cfg.export_google_docs.enabled:
+                try:
+                    status_msg = await send_status_update(
+                        output_channel, status_msg, "Google Docsにエクスポート中..."
+                    )
+                    title = f"Meeting Minutes — {date_str}"
+                    export_result = await exporter.export(
+                        minutes_md=minutes_md,
+                        title=title,
+                        metadata={"date": date_str, "speakers": speakers_str, "source": source_label},
+                        transcript_md=transcript_md,
+                    )
+                    if export_result.success:
+                        google_docs_url = export_result.url
+                        logger.info("Minutes exported to Google Docs: %s", export_result.url)
+                    else:
+                        logger.warning("Google Docs export failed (non-critical): %s", export_result.error)
+                except Exception:
+                    logger.warning("Google Docs export raised unexpected error (non-critical)", exc_info=True)
+
             # Status: posting
             status_msg = await send_status_update(
                 output_channel, status_msg, "議事録を投稿中..."
@@ -188,6 +210,7 @@ async def run_pipeline_from_tracks(
                 speaker_stats=speaker_stats_text,
                 transcript_md=transcript_md,
                 event_title=event_title or None,
+                google_docs_url=google_docs_url,
             )
 
             # Archive (fault-tolerant)
@@ -206,23 +229,6 @@ async def run_pipeline_from_tracks(
                     )
                 except Exception:
                     logger.warning("Archive write failed (non-critical)", exc_info=True)
-
-            # Export to Google Docs (fault-tolerant)
-            if exporter is not None and cfg.export_google_docs.enabled:
-                try:
-                    title = f"Meeting Minutes — {date_str}"
-                    export_result = await exporter.export(
-                        minutes_md=minutes_md,
-                        title=title,
-                        metadata={"date": date_str, "speakers": speakers_str, "source": source_label},
-                        transcript_md=transcript_md,
-                    )
-                    if export_result.success:
-                        logger.info("Minutes exported to Google Docs: %s", export_result.url)
-                    else:
-                        logger.warning("Google Docs export failed (non-critical): %s", export_result.error)
-                except Exception:
-                    logger.warning("Google Docs export raised unexpected error (non-critical)", exc_info=True)
 
         # Clean up status message
         if status_msg:

@@ -123,11 +123,11 @@ minutes_archive:
 
 export_google_docs:
   # Enable export of minutes to Google Docs
-  enabled: false
+  enabled: true
   # Path to service account JSON key file
   credentials_path: "credentials.json"
   # Google Drive folder ID for exported documents
-  folder_id: ""
+  folder_id: "11E8SiuJXcKqkBDaIJU_NSRwRT6-Z2Pj4"
   # Maximum retry attempts on export failure
   max_retries: 3
 
@@ -161,7 +161,7 @@ google_drive:
   # Google Drive folder ID to monitor (get from folder URL)
   folder_id: "18JpLtd8T_fzGOnHUei6cAO0NWty_qgSD"
   # Filename glob pattern to match Craig ZIP exports
-  file_pattern: "craig[_-]*.aac.zip"
+  file_pattern: "craig[_-]*.zip"
   # Polling interval in seconds
   poll_interval_sec: 30
   # Path to processed files tracking database (JSON)

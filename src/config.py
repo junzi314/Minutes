@@ -172,6 +172,8 @@ class MinutesArchiveConfig:
 class ExportGoogleDocsConfig:
     enabled: bool = False
     credentials_path: str = "credentials.json"
+    oauth_client_path: str = "oauth_client.json"
+    oauth_token_path: str = "token.json"
     folder_id: str = ""
     max_retries: int = 3
 

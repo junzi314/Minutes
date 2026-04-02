@@ -142,10 +142,13 @@ class DriveWatcher:
         # For a pattern like "craig_*.aac.zip", we use:
         #   name contains 'craig' and name contains '.aac.zip'
         # Combined with parent folder and mimeType constraints.
+        # Note: Google Drive reports ZIP files as either 'application/zip'
+        # or 'application/x-zip-compressed' depending on the uploader,
+        # so we accept both.
         query_parts: list[str] = [
             f"'{self._cfg.folder_id}' in parents",
             "trashed = false",
-            "mimeType = 'application/zip'",
+            "(mimeType = 'application/zip' or mimeType = 'application/x-zip-compressed')",
         ]
 
         # Convert glob pattern to Drive API name-contains clauses.
