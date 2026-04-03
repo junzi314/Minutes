@@ -439,46 +439,170 @@ class GoogleDocsExporter:
     def _update_timestamp_links_sync(
         self, doc_id: str, tab_id: str, doc_url: str,
     ) -> None:
-        """Replace placeholder URLs with actual tab links in the memo tab."""
-        target_url = f"{doc_url}?tab={tab_id}"
+        """Add transcript tab links to timestamp text in the memo tab.
+
+        Reads the memo tab (t.0), finds timestamp patterns like ``[01:29]``,
+        and adds a hyperlink to the transcript tab using ``updateTextStyle``.
+        """
+        # Build tab URL: strip existing query params, add ?tab=
+        base_url = doc_url.split("?")[0]
+        target_url = f"{base_url}?tab={tab_id}"
+
         docs_service = self._build_docs_service()
-        docs_service.documents().batchUpdate(
+
+        # Read the memo tab content to find timestamp positions
+        doc = docs_service.documents().get(
             documentId=doc_id,
-            body={
-                "requests": [
-                    {
-                        "replaceAllText": {
-                            "containsText": {
-                                "text": TRANSCRIPT_TAB_PLACEHOLDER,
-                                "matchCase": True,
-                            },
-                            "replaceText": target_url,
-                            "tabsCriteria": {"tabIds": ["t.0"]},
-                        }
-                    }
-                ]
-            },
+            includeTabsContent=True,
         ).execute()
 
-    def _rename_default_tab_sync(self, doc_id: str) -> None:
-        """Rename the default tab from 'Tab 1' to '📝 メモ'."""
-        docs_service = self._build_docs_service()
+        # Find the default tab (t.0) body content
+        tabs = doc.get("tabs", [])
+        body_content = None
+        for tab in tabs:
+            props = tab.get("tabProperties", {})
+            if props.get("tabId") == "t.0":
+                body_content = tab.get("documentTab", {}).get("body", {}).get("content", [])
+                break
+
+        if not body_content:
+            logger.warning("Could not read memo tab content for link update")
+            return
+
+        # Extract full text with character offsets
+        ts_pattern = re.compile(r"\[[\d:]+\]")
+        requests: list[dict[str, Any]] = []
+
+        for element in body_content:
+            paragraph = element.get("paragraph")
+            if not paragraph:
+                continue
+            for pe in paragraph.get("elements", []):
+                text_run = pe.get("textRun")
+                if not text_run:
+                    continue
+                text = text_run.get("content", "")
+                start_idx = pe.get("startIndex", 0)
+                for m in ts_pattern.finditer(text):
+                    abs_start = start_idx + m.start()
+                    abs_end = start_idx + m.end()
+                    requests.append({
+                        "updateTextStyle": {
+                            "textStyle": {
+                                "link": {"url": target_url},
+                            },
+                            "range": {
+                                "segmentId": "",
+                                "startIndex": abs_start,
+                                "endIndex": abs_end,
+                                "tabId": "t.0",
+                            },
+                            "fields": "link",
+                        }
+                    })
+
+        if not requests:
+            logger.info("No timestamps found in memo tab to link")
+            return
+
         docs_service.documents().batchUpdate(
             documentId=doc_id,
-            body={
-                "requests": [
-                    {
-                        "updateDocumentTab": {
-                            "tabProperties": {
-                                "tabId": "t.0",
-                                "title": "\U0001f4dd メモ",
-                            },
-                            "fields": "title",
-                        }
-                    }
-                ]
-            },
+            body={"requests": requests},
         ).execute()
+        logger.info("Linked %d timestamps to transcript tab", len(requests))
+
+    def _convert_checkboxes_sync(self, doc_id: str) -> None:
+        """Convert Unicode checkbox characters (☐/☑) to native Google Docs checklists.
+
+        Reads the memo tab, finds paragraphs containing ☐ or ☑, applies
+        BULLET_CHECKBOX preset, and removes the Unicode characters.
+        """
+        docs_service = self._build_docs_service()
+        doc = docs_service.documents().get(
+            documentId=doc_id,
+            includeTabsContent=True,
+        ).execute()
+
+        # Find the default tab (t.0)
+        tabs = doc.get("tabs", [])
+        body_content = None
+        for tab in tabs:
+            if tab.get("tabProperties", {}).get("tabId") == "t.0":
+                body_content = tab.get("documentTab", {}).get("body", {}).get("content", [])
+                break
+
+        if not body_content:
+            return
+
+        checkbox_ranges: list[tuple[int, int]] = []  # (para_start, para_end)
+        delete_ranges: list[tuple[int, int]] = []     # (char_start, char_end)
+
+        for element in body_content:
+            paragraph = element.get("paragraph")
+            if not paragraph:
+                continue
+            para_start = element.get("startIndex", 0)
+            para_end = element.get("endIndex", para_start)
+
+            for pe in paragraph.get("elements", []):
+                text_run = pe.get("textRun")
+                if not text_run:
+                    continue
+                text = text_run.get("content", "")
+                start_idx = pe.get("startIndex", 0)
+
+                for i, ch in enumerate(text):
+                    if ch in ("\u2610", "\u2611"):  # ☐ or ☑
+                        checkbox_ranges.append((para_start, para_end))
+                        # Delete the checkbox char (and trailing space if any)
+                        del_end = start_idx + i + 1
+                        if i + 1 < len(text) and text[i + 1] == " ":
+                            del_end += 1
+                        delete_ranges.append((start_idx + i, del_end))
+
+        if not checkbox_ranges:
+            return
+
+        # Build requests: first apply checkbox bullets, then delete chars
+        # Process deletions in reverse order to maintain valid indices
+        requests: list[dict[str, Any]] = []
+
+        # Apply checkbox bullet to each paragraph
+        seen_ranges = set()
+        for para_start, para_end in checkbox_ranges:
+            if (para_start, para_end) in seen_ranges:
+                continue
+            seen_ranges.add((para_start, para_end))
+            requests.append({
+                "createParagraphBullets": {
+                    "range": {
+                        "segmentId": "",
+                        "startIndex": para_start,
+                        "endIndex": para_end,
+                        "tabId": "t.0",
+                    },
+                    "bulletPreset": "BULLET_CHECKBOX",
+                }
+            })
+
+        # Delete Unicode checkbox chars (reverse order to preserve indices)
+        for del_start, del_end in sorted(delete_ranges, reverse=True):
+            requests.append({
+                "deleteContentRange": {
+                    "range": {
+                        "segmentId": "",
+                        "startIndex": del_start,
+                        "endIndex": del_end,
+                        "tabId": "t.0",
+                    }
+                }
+            })
+
+        docs_service.documents().batchUpdate(
+            documentId=doc_id,
+            body={"requests": requests},
+        ).execute()
+        logger.info("Converted %d checkboxes to native checklists", len(delete_ranges))
 
     async def export(
         self,
@@ -498,11 +622,8 @@ class GoogleDocsExporter:
         Never raises — returns ExportResult.
         """
         # Step 1: Upload minutes as HTML (existing logic with retry)
-        # Use placeholder URL for timestamps if transcript will be in a tab
-        html = self._md_to_html(
-            minutes_md,
-            transcript_doc_url=TRANSCRIPT_TAB_PLACEHOLDER if transcript_md else None,
-        )
+        # Timestamps are styled as blue text; links added by Docs API after tab creation
+        html = self._md_to_html(minutes_md)
         last_error = None
         doc_id: str | None = None
         url: str | None = None
@@ -562,13 +683,13 @@ class GoogleDocsExporter:
                 await asyncio.to_thread(
                     self._update_timestamp_links_sync, doc_id, tab_id, url,
                 )
-                # Rename default tab to "📝 メモ" on full success
+                # Convert Unicode checkboxes to native Google Docs checklists
                 try:
                     await asyncio.to_thread(
-                        self._rename_default_tab_sync, doc_id,
+                        self._convert_checkboxes_sync, doc_id,
                     )
                 except Exception as exc:
-                    logger.warning("Tab rename failed (non-critical): %s", exc)
+                    logger.warning("Checkbox conversion failed (non-critical): %s", exc)
 
                 logger.info(
                     "2-tab doc created: doc=%s memo=t.0 transcript=%s",

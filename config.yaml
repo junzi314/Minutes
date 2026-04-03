@@ -123,11 +123,11 @@ minutes_archive:
 
 export_google_docs:
   # Enable export of minutes to Google Docs
-  enabled: false
+  enabled: true
   # Path to service account JSON key file
   credentials_path: "credentials.json"
   # Google Drive folder ID for exported documents
-  folder_id: ""
+  folder_id: "11E8SiuJXcKqkBDaIJU_NSRwRT6-Z2Pj4"
   # Maximum retry attempts on export failure
   max_retries: 3
 
@@ -153,6 +153,20 @@ transcript_glossary:
   # Case-sensitive matching (false = case-insensitive, recommended)
   case_sensitive: false
 
+diarization:
+  # Enable speaker diarization for single audio/video files
+  enabled: false
+  # HuggingFace model ID for DiariZen
+  model: "BUT-FIT/diarizen-wavlm-large-s80-md"
+  # Device for inference: cuda or cpu
+  device: "cuda"
+  # Number of speakers (0 = auto-detect)
+  num_speakers: 0
+  # Glob pattern to match video/audio files on Google Drive
+  drive_file_pattern: "*.mp4"
+  # FFmpeg audio extraction timeout in seconds
+  ffmpeg_timeout_sec: 300
+
 google_drive:
   # Enable Google Drive folder monitoring
   enabled: true
@@ -161,7 +175,7 @@ google_drive:
   # Google Drive folder ID to monitor (get from folder URL)
   folder_id: "18JpLtd8T_fzGOnHUei6cAO0NWty_qgSD"
   # Filename glob pattern to match Craig ZIP exports
-  file_pattern: "craig[_-]*.aac.zip"
+  file_pattern: "craig[_-]*.zip"
   # Polling interval in seconds
   poll_interval_sec: 30
   # Path to processed files tracking database (JSON)

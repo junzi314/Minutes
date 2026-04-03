@@ -58,6 +58,11 @@ class CalendarError(MinutesBotError):
         super().__init__(message, stage="calendar")
 
 
+class DiarizationError(MinutesBotError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, stage="diarization")
+
+
 class ConfigError(MinutesBotError):
     def __init__(self, message: str) -> None:
         super().__init__(message, stage="config")

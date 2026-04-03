@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import Config, CalendarConfig, DiscordConfig, ExportGoogleDocsConfig, GuildConfig, GuildDriveConfig, TranscriptGlossaryConfig, load
+from src.config import Config, CalendarConfig, DiarizationConfig, DiscordConfig, ExportGoogleDocsConfig, GuildConfig, GuildDriveConfig, TranscriptGlossaryConfig, load
 from src.errors import ConfigError
 
 
@@ -810,3 +810,95 @@ class TestCalendarConfig:
         assert cfg.calendar.enabled is True
         assert cfg.calendar.calendar_id == "team@group.calendar.google.com"
         assert cfg.calendar.timezone == "UTC"
+
+
+class TestDiarizationConfig:
+    def test_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DiarizationConfig has sensible defaults when section is missing."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token-123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 123456789
+              watch_channel_id: 111222333
+              output_channel_id: 444555666
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.diarization.enabled is False
+        assert cfg.diarization.model == "BUT-FIT/diarizen-wavlm-large-s80-md"
+        assert cfg.diarization.device == "cuda"
+        assert cfg.diarization.num_speakers == 0
+        assert cfg.diarization.ffmpeg_timeout_sec == 300
+
+    def test_from_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DiarizationConfig loads from YAML."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token-123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 123456789
+              watch_channel_id: 111222333
+              output_channel_id: 444555666
+            diarization:
+              enabled: true
+              model: "custom-model"
+              device: "cpu"
+              num_speakers: 3
+              ffmpeg_timeout_sec: 600
+              drive_file_pattern: "*.mkv"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.diarization.enabled is True
+        assert cfg.diarization.model == "custom-model"
+        assert cfg.diarization.device == "cpu"
+        assert cfg.diarization.num_speakers == 3
+        assert cfg.diarization.ffmpeg_timeout_sec == 600
+        assert cfg.diarization.drive_file_pattern == "*.mkv"
+
+    def test_validation_invalid_num_speakers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative num_speakers raises ConfigError."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token-123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 123456789
+              watch_channel_id: 111222333
+              output_channel_id: 444555666
+            diarization:
+              enabled: true
+              num_speakers: -1
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="num_speakers must be >= 0"):
+            load(str(cfg_path), str(env_path))
+
+    def test_validation_ffmpeg_timeout_too_low(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ffmpeg_timeout_sec below 10 raises ConfigError."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token-123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guild_id: 123456789
+              watch_channel_id: 111222333
+              output_channel_id: 444555666
+            diarization:
+              enabled: true
+              ffmpeg_timeout_sec: 5
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="ffmpeg_timeout_sec must be >= 10"):
+            load(str(cfg_path), str(env_path))

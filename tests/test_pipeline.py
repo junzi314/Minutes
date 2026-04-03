@@ -17,6 +17,7 @@ from src.config import (
     CalendarConfig,
     Config,
     CraigConfig,
+    DiarizationConfig,
     DiscordConfig,
     ExportGoogleDocsConfig,
     GeneratorConfig,
@@ -38,7 +39,7 @@ from src.errors import (
     PostingError,
     TranscriptionError,
 )
-from src.pipeline import _transcript_hash, run_pipeline, run_pipeline_from_tracks
+from src.pipeline import _transcript_hash, run_pipeline, run_pipeline_from_segments, run_pipeline_from_tracks
 from src.state_store import StateStore
 from src.transcriber import Segment
 
@@ -68,6 +69,7 @@ def _make_config(**overrides: object) -> Config:
         export_google_docs=ExportGoogleDocsConfig(),
         calendar=CalendarConfig(),
         transcript_glossary=TranscriptGlossaryConfig(),
+        diarization=DiarizationConfig(),
     )
     kwargs.update(overrides)
     return Config(**kwargs)
@@ -877,3 +879,146 @@ class TestPipelineGlossary:
         # The transcript should still contain original "Hello" not "Corrected"
         call_kwargs = mock_generator.generate.call_args.kwargs
         assert "Hello" in call_kwargs["transcript"]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline from segments (diarization flow)
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineFromSegments:
+    @pytest.mark.asyncio
+    async def test_success(
+        self,
+        cfg: Config,
+        mock_channel: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+    ) -> None:
+        """run_pipeline_from_segments posts minutes from pre-aligned segments."""
+        segments = _make_segments()
+        mock_channel.guild.id = 1
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            await run_pipeline_from_segments(
+                segments=segments,
+                cfg=cfg,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+                source_label="diarization:test.mp4",
+            )
+
+        mock_generator.generate.assert_called_once()
+        mock_post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_segments_raises(
+        self,
+        cfg: Config,
+        mock_channel: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+    ) -> None:
+        """Empty segments list raises TranscriptionError."""
+        with pytest.raises(TranscriptionError, match="No segments"):
+            await run_pipeline_from_segments(
+                segments=[],
+                cfg=cfg,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+    @pytest.mark.asyncio
+    async def test_with_glossary(
+        self,
+        mock_channel: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+    ) -> None:
+        """Glossary correction applies to segments."""
+        cfg = _make_config(transcript_glossary=TranscriptGlossaryConfig(enabled=True))
+        segments = _make_segments()
+        mock_channel.guild.id = 1
+        state_store.set_guild_glossary(1, {"Hello": "Corrected"})
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            await run_pipeline_from_segments(
+                segments=segments,
+                cfg=cfg,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+        call_kwargs = mock_generator.generate.call_args.kwargs
+        assert "Corrected" in call_kwargs["transcript"]
+
+    @pytest.mark.asyncio
+    async def test_with_exporter(
+        self,
+        cfg: Config,
+        mock_channel: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+    ) -> None:
+        """Google Docs exporter is called when enabled."""
+        cfg_with_export = _make_config(
+            export_google_docs=ExportGoogleDocsConfig(enabled=True, folder_id="test-folder"),
+        )
+        segments = _make_segments()
+        mock_channel.guild.id = 1
+
+        mock_exporter = MagicMock()
+        mock_export_result = MagicMock()
+        mock_export_result.success = True
+        mock_export_result.url = "https://docs.google.com/test"
+        mock_exporter.export = AsyncMock(return_value=mock_export_result)
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            await run_pipeline_from_segments(
+                segments=segments,
+                cfg=cfg_with_export,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+                exporter=mock_exporter,
+            )
+
+        mock_exporter.export.assert_called_once()
+        mock_post.assert_called_once()
+        assert mock_post.call_args.kwargs["google_docs_url"] == "https://docs.google.com/test"
+
+    @pytest.mark.asyncio
+    async def test_speaker_names_extracted(
+        self,
+        cfg: Config,
+        mock_channel: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+    ) -> None:
+        """Speaker names are extracted from segments and passed to generator."""
+        segments = _make_segments()  # has alice and bob
+        mock_channel.guild.id = 1
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = MagicMock(id=42)
+
+            await run_pipeline_from_segments(
+                segments=segments,
+                cfg=cfg,
+                generator=mock_generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+            )
+
+        call_kwargs = mock_generator.generate.call_args.kwargs
+        assert "alice" in call_kwargs["speakers"]
+        assert "bob" in call_kwargs["speakers"]

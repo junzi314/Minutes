@@ -21,11 +21,11 @@ import discord
 from src.audio_source import SpeakerAudio
 from src.config import Config, GoogleDriveConfig, GuildConfig, load
 from src.detector import DetectedRecording, RECORDING_URL_PATTERN, parse_recording_ended
-from src.drive_watcher import DriveWatcher
+from src.drive_watcher import DriveWatcher, VideoDriveWatcher
 from src.errors import MinutesBotError
 from src.generator import MinutesGenerator
 from src.minutes_archive import MinutesArchive
-from src.pipeline import run_pipeline, run_pipeline_from_tracks
+from src.pipeline import run_pipeline, run_pipeline_from_segments, run_pipeline_from_tracks
 from src.poster import OutputChannel
 from src.state_store import StateStore
 from src.transcriber import Transcriber, create_transcriber
@@ -136,6 +136,7 @@ class MinutesBot(discord.Client):
         self.exporter = exporter
         self.http_session: aiohttp.ClientSession | None = None
         self.drive_watchers: dict[int, DriveWatcher] = {}
+        self.video_watchers: dict[int, VideoDriveWatcher] = {}
         self._start_time = time.monotonic()
         super().__init__(**kwargs)
         self.tree = discord.app_commands.CommandTree(self)
@@ -148,6 +149,8 @@ class MinutesBot(discord.Client):
     async def close(self) -> None:
         """Clean up resources on shutdown."""
         for watcher in self.drive_watchers.values():
+            watcher.stop()
+        for watcher in self.video_watchers.values():
             watcher.stop()
         if self.archive is not None:
             self.archive.close()
@@ -182,6 +185,10 @@ class MinutesBot(discord.Client):
 
         # Start per-guild Google Drive watchers
         self._start_drive_watchers()
+
+        # Start per-guild video/audio file watchers (diarization)
+        if self.cfg.diarization.enabled:
+            self._start_video_watchers()
 
     def resolve_template(self, guild_id: int) -> str:
         """Resolve template name for a guild.
@@ -290,6 +297,134 @@ class MinutesBot(discord.Client):
                 gcfg.guild_id,
                 folder_id,
                 gcfg.output_channel_id,
+            )
+
+    def _start_video_watchers(self) -> None:
+        """Start per-guild video/audio file watchers for diarization.
+
+        Only starts when both diarization.enabled and google_drive.enabled
+        are true. Uses the same Drive folder as Craig watcher.
+        """
+        global_drive = self.cfg.google_drive
+        diar_cfg = self.cfg.diarization
+
+        for gcfg in self.cfg.discord.guilds:
+            guild_drive = gcfg.google_drive
+            if guild_drive is not None:
+                enabled = guild_drive.enabled
+                folder_id = guild_drive.folder_id or global_drive.folder_id
+            else:
+                enabled = global_drive.enabled
+                folder_id = global_drive.folder_id
+
+            if not enabled or not folder_id:
+                continue
+
+            output_channel = self._get_output_channel_for_guild(gcfg)
+            if output_channel is None:
+                logger.error(
+                    "Output channel %d not found for guild %d, video watcher will not start",
+                    gcfg.output_channel_id, gcfg.guild_id,
+                )
+                continue
+
+            watcher_drive_cfg = GoogleDriveConfig(
+                enabled=True,
+                credentials_path=global_drive.credentials_path,
+                folder_id=folder_id,
+                file_pattern=global_drive.file_pattern,
+                poll_interval_sec=global_drive.poll_interval_sec,
+            )
+
+            _guild_cfg = gcfg
+            _out_ch = output_channel
+
+            async def _on_video_file(
+                file_path: Path,
+                source_label: str,
+                *,
+                _gcfg: GuildConfig = _guild_cfg,
+                _channel: OutputChannel = _out_ch,
+            ) -> None:
+                await self._run_diarization_pipeline(
+                    file_path, source_label, _gcfg, _channel,
+                )
+
+            watcher = VideoDriveWatcher(
+                drive_cfg=watcher_drive_cfg,
+                diar_cfg=diar_cfg,
+                state_store=self.state_store,
+                on_new_video=_on_video_file,
+            )
+            watcher.start()
+            self.video_watchers[gcfg.guild_id] = watcher
+            logger.info(
+                "Video watcher started for guild %d (folder=%s, pattern=%s)",
+                gcfg.guild_id, folder_id, diar_cfg.drive_file_pattern,
+            )
+
+    async def _run_diarization_pipeline(
+        self,
+        file_path: Path,
+        source_label: str,
+        guild_cfg: GuildConfig,
+        output_channel: OutputChannel,
+    ) -> None:
+        """Full diarization flow: extract audio → transcribe → diarize → align → pipeline."""
+        import tempfile
+
+        from src.audio_extractor import AudioExtractionError, extract_audio
+        from src.diarizer import DiariZenDiarizer
+        from src.errors import DiarizationError
+        from src.segment_aligner import align_segments
+
+        template_name = self.resolve_template(guild_cfg.guild_id)
+        error_role = self.cfg.discord.resolve_error_role(guild_cfg.guild_id)
+        diar_cfg = self.cfg.diarization
+
+        with tempfile.TemporaryDirectory(prefix="diar-") as tmp_dir:
+            wav_path = Path(tmp_dir) / "audio.wav"
+
+            # Step 1: Extract audio
+            await extract_audio(
+                file_path, wav_path,
+                timeout_sec=diar_cfg.ffmpeg_timeout_sec,
+            )
+
+            # Step 2: Transcribe (speaker field will be overwritten by alignment)
+            segments = await asyncio.to_thread(
+                self.transcriber.transcribe_file, wav_path, speaker_name="",
+            )
+
+            # Step 3: Diarize (with fallback on failure)
+            diar_segments = []
+            diarizer = DiariZenDiarizer(diar_cfg)
+            try:
+                diarizer.load_model()
+                diar_segments = diarizer.diarize(wav_path)
+            except DiarizationError:
+                logger.warning(
+                    "Diarization failed for %s, falling back to single speaker",
+                    source_label, exc_info=True,
+                )
+            finally:
+                diarizer.unload_model()
+
+            # Step 4: Align
+            aligned = align_segments(segments, diar_segments)
+
+            # Step 5: Pipeline stages 3-5
+            await run_pipeline_from_segments(
+                segments=aligned,
+                cfg=self.cfg,
+                generator=self.generator,
+                output_channel=output_channel,
+                state_store=self.state_store,
+                source_label=source_label,
+                template_name=template_name,
+                archive=self.archive,
+                exporter=self.exporter,
+                error_mention_role_id=error_role,
             )
 
     async def on_raw_message_update(
