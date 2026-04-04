@@ -1,0 +1,42 @@
+# Zoom Diarization Slack Service — Configuration
+# Environment variable overrides: SECTION_FIELD (e.g. SLACK_BOT_TOKEN)
+
+slack:
+  # bot_token: "xoxb-..."         # Or set SLACK_BOT_TOKEN env var
+  # channel_id: "C0123456789"     # Or set SLACK_CHANNEL_ID env var
+  include_transcript: true         # Attach full transcript as .md file
+  thread_replies: true             # Post status updates in thread
+
+zoom:
+  vtt_file_pattern: "*.vtt"        # Zoom VTT filename pattern
+  audio_file_pattern: "*.m4a"      # Zoom audio filename pattern
+  pair_timeout_sec: 300            # Seconds to wait for m4a+VTT pair (min: 30)
+
+diarization:
+  enabled: true
+  model: "BUT-FIT/diarizen-wavlm-large-s80-md"
+  device: "cuda"
+  num_speakers: 0                  # 0 = auto-detect
+  ffmpeg_timeout_sec: 300
+
+generator:
+  # api_key: ""                    # Or set ANTHROPIC_API_KEY env var
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 4096
+  temperature: 0.3
+  prompt_template_path: "prompts/minutes.txt"
+
+merger:
+  timestamp_format: "[{mm}:{ss}]"
+  min_segment_chars: 1
+  gap_merge_threshold_sec: 1.0
+
+google_drive:
+  enabled: false
+  # credentials_path: "credentials.json"
+  # folder_id: ""                  # Google Drive folder ID to monitor
+  poll_interval_sec: 30
+
+pipeline:
+  processing_timeout_sec: 3600
+  state_dir: "state"

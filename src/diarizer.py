@@ -120,7 +120,7 @@ class DiariZenDiarizer:
                 DiarSegment(
                     start=segment.start,
                     end=segment.end,
-                    speaker=speaker_label,
+                    speaker=str(speaker_label),
                 )
             )
 
