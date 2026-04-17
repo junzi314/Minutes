@@ -196,26 +196,6 @@ class TranscriptGlossaryConfig:
 
 
 @dataclass(frozen=True)
-class DiarizationConfig:
-    enabled: bool = False
-    model: str = "BUT-FIT/diarizen-wavlm-large-s80-md"
-    device: str = "cuda"
-    num_speakers: int = 0                    # 0 = auto-detect
-    drive_file_pattern: str = "*.mp4"
-    drive_mime_types: tuple[str, ...] = (
-        "video/mp4",
-        "video/x-matroska",
-        "video/webm",
-        "audio/mpeg",
-        "audio/mp4",
-        "audio/x-m4a",
-        "audio/wav",
-        "audio/flac",
-    )
-    ffmpeg_timeout_sec: int = 300
-
-
-@dataclass(frozen=True)
 class Config:
     discord: DiscordConfig
     craig: CraigConfig
@@ -231,7 +211,6 @@ class Config:
     export_google_docs: ExportGoogleDocsConfig
     calendar: CalendarConfig
     transcript_glossary: TranscriptGlossaryConfig
-    diarization: DiarizationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +232,6 @@ _SECTION_CLASSES: dict[str, type] = {
     "export_google_docs": ExportGoogleDocsConfig,
     "calendar": CalendarConfig,
     "transcript_glossary": TranscriptGlossaryConfig,
-    "diarization": DiarizationConfig,
 }
 
 
@@ -501,15 +479,6 @@ def _validate(cfg: Config) -> None:
             errors.append("calendar.calendar_id is required when calendar.enabled is true")
         if cfg.calendar.match_tolerance_minutes < 0:
             errors.append("calendar.match_tolerance_minutes must be >= 0")
-
-    # Diarization (only validate when enabled)
-    if cfg.diarization.enabled:
-        if cfg.diarization.num_speakers < 0:
-            errors.append("diarization.num_speakers must be >= 0 (0 = auto)")
-        if cfg.diarization.ffmpeg_timeout_sec < 10:
-            errors.append("diarization.ffmpeg_timeout_sec must be >= 10")
-        if not cfg.diarization.drive_file_pattern:
-            errors.append("diarization.drive_file_pattern is required when diarization is enabled")
 
     # Per-guild Google Drive validation
     for i, guild in enumerate(cfg.discord.guilds):

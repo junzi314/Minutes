@@ -153,19 +153,6 @@ transcript_glossary:
   # Case-sensitive matching (false = case-insensitive, recommended)
   case_sensitive: false
 
-diarization:
-  # Enable speaker diarization for single audio/video files
-  enabled: false
-  # HuggingFace model ID for DiariZen
-  model: "BUT-FIT/diarizen-wavlm-large-s80-md"
-  # Device for inference: cuda or cpu
-  device: "cuda"
-  # Number of speakers (0 = auto-detect)
-  num_speakers: 0
-  # Glob pattern to match video/audio files on Google Drive
-  drive_file_pattern: "*.mp4"
-  # FFmpeg audio extraction timeout in seconds
-  ffmpeg_timeout_sec: 300
 
 google_drive:
   # Enable Google Drive folder monitoring

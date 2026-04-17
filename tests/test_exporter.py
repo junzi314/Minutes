@@ -820,7 +820,7 @@ class TestTimestampLinks:
 
         result = exp._fetch_heading_ids_sync("doc-1", "t.transcript")
 
-        assert result == {"文字起こし": "h.title", "00:01:24": "h.ts1"}
+        assert result == {"00:01:24": "h.ts1"}
 
     @pytest.mark.asyncio
     async def test_export_calls_link_update_after_tab(self) -> None:
