@@ -47,6 +47,14 @@ class GuildDriveConfig:
 
 
 @dataclass(frozen=True)
+class DriveFolderRoute:
+    """Maps a single Drive folder to a specific output channel."""
+
+    folder_id: str
+    output_channel_id: int
+
+
+@dataclass(frozen=True)
 class GuildConfig:
     """Per-guild configuration (guild ID, watch channel, output channel)."""
 
@@ -56,6 +64,7 @@ class GuildConfig:
     template: str = "minutes"
     error_mention_role_id: int | None = None
     google_drive: GuildDriveConfig | None = None
+    drive_folders: tuple[DriveFolderRoute, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -347,6 +356,22 @@ def _build_discord_section(yaml_section: dict) -> DiscordConfig:
                     enabled=gd_raw.get("enabled", True),
                     folder_id=gd_raw.get("folder_id", ""),
                 )
+            # Parse per-guild drive_folders list (folder→channel routes)
+            df_raw = entry.get("drive_folders") or []
+            if not isinstance(df_raw, list):
+                raise ConfigError(
+                    f"discord.guilds[{i}].drive_folders must be a list"
+                )
+            routes: list[DriveFolderRoute] = []
+            for j, route_entry in enumerate(df_raw):
+                if not isinstance(route_entry, dict):
+                    raise ConfigError(
+                        f"discord.guilds[{i}].drive_folders[{j}] must be a mapping"
+                    )
+                routes.append(DriveFolderRoute(
+                    folder_id=route_entry.get("folder_id", ""),
+                    output_channel_id=route_entry.get("output_channel_id", 0),
+                ))
             guild_configs.append(GuildConfig(
                 guild_id=entry.get("guild_id", 0),
                 watch_channel_id=entry.get("watch_channel_id", 0),
@@ -354,6 +379,7 @@ def _build_discord_section(yaml_section: dict) -> DiscordConfig:
                 template=entry.get("template", "minutes"),
                 error_mention_role_id=entry.get("error_mention_role_id"),
                 google_drive=guild_drive,
+                drive_folders=tuple(routes),
             ))
         guilds = tuple(guild_configs)
     elif "guild_id" in yaml_section:
@@ -489,6 +515,21 @@ def _validate(cfg: Config) -> None:
                 errors.append(
                     f"discord.guilds[{i}].google_drive.folder_id is required "
                     f"when enabled (no global fallback set either)"
+                )
+        # Validate drive_folders routes
+        seen_folders: set[str] = set()
+        for j, route in enumerate(guild.drive_folders):
+            prefix = f"discord.guilds[{i}].drive_folders[{j}]"
+            if not route.folder_id:
+                errors.append(f"{prefix}.folder_id is required")
+            elif route.folder_id in seen_folders:
+                errors.append(f"{prefix}.folder_id '{route.folder_id}' is duplicated within this guild")
+            else:
+                seen_folders.add(route.folder_id)
+            if route.output_channel_id < 0:
+                errors.append(
+                    f"{prefix}.output_channel_id must be 0 "
+                    f"(skip Discord posting) or a positive integer"
                 )
 
     if errors:

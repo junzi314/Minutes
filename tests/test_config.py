@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import Config, CalendarConfig, DiscordConfig, ExportGoogleDocsConfig, GuildConfig, GuildDriveConfig, TranscriptGlossaryConfig, load
+from src.config import Config, CalendarConfig, DiscordConfig, DriveFolderRoute, ExportGoogleDocsConfig, GuildConfig, GuildDriveConfig, TranscriptGlossaryConfig, load
 from src.errors import ConfigError
 
 
@@ -666,6 +666,130 @@ class TestPerGuildDrive:
         assert cfg.discord.guilds[0].google_drive.folder_id == ""
         # Global fallback provides the folder_id
         assert cfg.google_drive.folder_id == "global_folder"
+
+
+class TestDriveFolders:
+    def test_drive_folders_parsed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """drive_folders list is parsed into DriveFolderRoute tuples."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  output_channel_id: 100
+                  drive_folders:
+                    - folder_id: "fA"
+                      output_channel_id: 111
+                    - folder_id: "fB"
+                      output_channel_id: 222
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        routes = cfg.discord.guilds[0].drive_folders
+        assert routes == (
+            DriveFolderRoute(folder_id="fA", output_channel_id=111),
+            DriveFolderRoute(folder_id="fB", output_channel_id=222),
+        )
+
+    def test_drive_folders_defaults_to_empty(self) -> None:
+        """GuildConfig.drive_folders defaults to empty tuple."""
+        g = GuildConfig(guild_id=1, output_channel_id=2)
+        assert g.drive_folders == ()
+
+    def test_drive_folders_missing_folder_id_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  output_channel_id: 100
+                  drive_folders:
+                    - output_channel_id: 111
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="folder_id"):
+            load(str(cfg_path), str(env_path))
+
+    def test_drive_folders_zero_channel_accepted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """output_channel_id=0 (or omitted) is allowed -- means no Discord posting."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  output_channel_id: 100
+                  drive_folders:
+                    - folder_id: "fA"
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        cfg = load(str(cfg_path), str(env_path))
+        assert cfg.discord.guilds[0].drive_folders[0].output_channel_id == 0
+
+    def test_drive_folders_negative_channel_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Negative output_channel_id is rejected."""
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  output_channel_id: 100
+                  drive_folders:
+                    - folder_id: "fA"
+                      output_channel_id: -1
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="output_channel_id"):
+            load(str(cfg_path), str(env_path))
+
+    def test_drive_folders_duplicate_folder_id_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  output_channel_id: 100
+                  drive_folders:
+                    - folder_id: "dup"
+                      output_channel_id: 111
+                    - folder_id: "dup"
+                      output_channel_id: 222
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="duplicated"):
+            load(str(cfg_path), str(env_path))
+
+    def test_drive_folders_not_a_list_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+        cfg_path = _write_config(tmp_path, """
+            discord:
+              guilds:
+                - guild_id: 1
+                  output_channel_id: 100
+                  drive_folders:
+                    folder_id: "fA"
+                    output_channel_id: 111
+            """)
+        env_path = _write_env(tmp_path, "")
+
+        with pytest.raises(ConfigError, match="must be a list"):
+            load(str(cfg_path), str(env_path))
 
 
 class TestWhisperBackend:

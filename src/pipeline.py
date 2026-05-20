@@ -48,20 +48,41 @@ async def run_pipeline_from_tracks(
     cfg: Config,
     transcriber: Transcriber,
     generator: MinutesGenerator,
-    output_channel: OutputChannel,
+    output_channel: OutputChannel | None,
     state_store: StateStore,
     source_label: str = "unknown",
     template_name: str = "minutes",
     archive: MinutesArchive | None = None,
     exporter: object | None = None,
     error_mention_role_id: int | None = None,
+    guild_id: int = 0,
+    guild_name: str = "",
 ) -> None:
     """Execute stages 2-5 (transcribe -> merge -> generate -> post) on pre-downloaded tracks.
 
     This is the shared core used by both Craig detection and Drive watcher flows.
+
+    When ``output_channel`` is ``None``, all Discord-side operations (status
+    updates, posting, error embeds) are skipped, but transcription, minutes
+    generation, Google Docs export, and archive still run. In that mode the
+    caller must pass ``guild_id`` (and optionally ``guild_name``) so glossary
+    lookup and archive metadata still work.
     """
     pipeline_start = time.monotonic()
     status_msg: discord.Message | None = None
+
+    # Resolve guild metadata once: explicit params win, fall back to output_channel.
+    resolved_guild_id: int = guild_id or (
+        output_channel.guild.id
+        if output_channel and output_channel.guild
+        else 0
+    )
+    resolved_guild_name: str = guild_name or (
+        output_channel.guild.name
+        if output_channel and output_channel.guild
+        else ""
+    )
+    channel_name: str = output_channel.name if output_channel else ""
 
     logger.info(
         "Pipeline (from tracks) starting for source=%s (%d tracks)",
@@ -85,14 +106,13 @@ async def run_pipeline_from_tracks(
 
             # Glossary correction (between transcribe and merge)
             if cfg.transcript_glossary.enabled:
-                guild_id = output_channel.guild.id if output_channel.guild else 0
-                glossary = state_store.get_guild_glossary(guild_id)
+                glossary = state_store.get_guild_glossary(resolved_guild_id)
                 if glossary:
                     from src.glossary import apply_glossary
                     segments = apply_glossary(
                         segments, glossary, cfg.transcript_glossary.case_sensitive,
                     )
-                    logger.info("[glossary] Applied %d entries for guild=%d", len(glossary), guild_id)
+                    logger.info("[glossary] Applied %d entries for guild=%d", len(glossary), resolved_guild_id)
 
             # Speaker analytics (between transcribe and merge)
             speaker_stats_text: str | None = None
@@ -149,8 +169,6 @@ async def run_pipeline_from_tracks(
                 transcript_md = format_transcript_markdown(
                     transcript, date_str, speakers_str,
                 )
-            guild_name = output_channel.guild.name if output_channel.guild else ""
-
             th = _transcript_hash(transcript, template_name)
             minutes_md = state_store.get_cached_minutes(th)
 
@@ -162,8 +180,8 @@ async def run_pipeline_from_tracks(
                     transcript=transcript,
                     date=date_str,
                     speakers=speakers_str,
-                    guild_name=guild_name,
-                    channel_name=output_channel.name,
+                    guild_name=resolved_guild_name,
+                    channel_name=channel_name,
                     template_name=template_name,
                     event_title=event_title,
                     event_attendees=event_attendees,
@@ -195,34 +213,40 @@ async def run_pipeline_from_tracks(
                 except Exception:
                     logger.warning("Google Docs export raised unexpected error (non-critical)", exc_info=True)
 
-            # Status: posting
-            status_msg = await send_status_update(
-                output_channel, status_msg, "議事録を投稿中..."
-            )
-
-            # Stage 5: Post to Discord
-            message = await post_minutes(
-                channel=output_channel,
-                minutes_md=minutes_md,
-                date=date_str,
-                speakers=speakers_str,
-                cfg=cfg.poster,
-                speaker_stats=speaker_stats_text,
-                transcript_md=transcript_md,
-                event_title=event_title or None,
-                google_docs_url=google_docs_url,
-            )
+            # Stage 5: Post to Discord (skipped when channel is None)
+            message: discord.Message | None = None
+            if output_channel is not None:
+                status_msg = await send_status_update(
+                    output_channel, status_msg, "議事録を投稿中..."
+                )
+                message = await post_minutes(
+                    channel=output_channel,
+                    minutes_md=minutes_md,
+                    date=date_str,
+                    speakers=speakers_str,
+                    cfg=cfg.poster,
+                    speaker_stats=speaker_stats_text,
+                    transcript_md=transcript_md,
+                    event_title=event_title or None,
+                    google_docs_url=google_docs_url,
+                )
+            else:
+                logger.info(
+                    "No output channel for source=%s; skipping Discord post "
+                    "(transcription and minutes still generated)",
+                    source_label,
+                )
 
             # Archive (fault-tolerant)
             if archive is not None and cfg.minutes_archive.enabled:
                 try:
                     archive.store(
-                        guild_id=output_channel.guild.id,
+                        guild_id=resolved_guild_id,
                         date_str=date_str,
                         speakers=speakers_str,
                         minutes_md=minutes_md,
                         source_label=source_label,
-                        channel_name=output_channel.name,
+                        channel_name=channel_name,
                         template_name=template_name,
                         transcript_hash=th,
                         transcript_md=transcript_md or "",
@@ -277,12 +301,13 @@ async def run_pipeline_from_tracks(
                 await status_msg.delete()
             except discord.HTTPException:
                 pass
-        await post_error(
-            channel=output_channel,
-            error_message=str(exc),
-            stage=exc.stage,
-            error_mention_role_id=error_mention_role_id,
-        )
+        if output_channel is not None:
+            await post_error(
+                channel=output_channel,
+                error_message=str(exc),
+                stage=exc.stage,
+                error_mention_role_id=error_mention_role_id,
+            )
         raise
 
     except Exception as exc:
@@ -297,12 +322,13 @@ async def run_pipeline_from_tracks(
                 await status_msg.delete()
             except discord.HTTPException:
                 pass
-        await post_error(
-            channel=output_channel,
-            error_message=str(exc),
-            stage="unknown",
-            error_mention_role_id=error_mention_role_id,
-        )
+        if output_channel is not None:
+            await post_error(
+                channel=output_channel,
+                error_message=str(exc),
+                stage="unknown",
+                error_mention_role_id=error_mention_role_id,
+            )
         raise
 
 
