@@ -7,6 +7,7 @@ import io
 import logging
 import re
 from datetime import datetime
+from typing import Any
 
 import discord
 
@@ -55,6 +56,7 @@ def build_minutes_embed(
     cfg: PosterConfig,
     speaker_stats: str | None = None,
     event_title: str | None = None,
+    google_docs_url: str | None = None,
 ) -> discord.Embed:
     """Build a Discord embed summarising the generated minutes."""
     summary = _extract_section(minutes_md, _SUMMARY_PATTERN)
@@ -106,7 +108,10 @@ def build_minutes_embed(
             inline=False,
         )
 
-    embed.set_footer(text="詳細議事録は添付ファイルを参照")
+    if google_docs_url:
+        embed.set_footer(text="詳細はGoogle Docsを参照")
+    else:
+        embed.set_footer(text="詳細議事録は添付ファイルを参照")
 
     # Ensure total embed length stays within Discord limits
     total_len = len(embed.title or "") + sum(
@@ -205,6 +210,7 @@ async def post_minutes(
     speaker_stats: str | None = None,
     transcript_md: str | None = None,
     event_title: str | None = None,
+    google_docs_url: str | None = None,
 ) -> discord.Message:
     """Post minutes embed + markdown file(s) to the channel.
 
@@ -213,13 +219,35 @@ async def post_minutes(
     When *transcript_md* is provided, attaches both minutes and transcript files.
     Retries on Discord rate limits. Returns the sent message.
     """
-    embed = build_minutes_embed(minutes_md, date, speakers, cfg, speaker_stats=speaker_stats, event_title=event_title)
+    embed = build_minutes_embed(
+        minutes_md, date, speakers, cfg,
+        speaker_stats=speaker_stats, event_title=event_title,
+        google_docs_url=google_docs_url,
+    )
 
     mention_text = " ".join(f"<@{uid}>" for uid in cfg.mention_user_ids) or None
 
+    # Build a persistent View with a link button when Google Docs URL is available
+    view: discord.ui.View | None = None
+    if google_docs_url:
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.link,
+            label="▶ Google Docs で全文を見る",
+            url=google_docs_url,
+            emoji="\U0001f4c4",
+        ))
+
     def _build_files() -> list[discord.File]:
-        """Build the list of file attachments (recreated each attempt)."""
-        files = [build_minutes_file(minutes_md, date)]
+        """Build the list of file attachments (recreated each attempt).
+
+        When a Google Docs URL is available, the minutes MD file is omitted
+        (the link is in the embed instead). Transcript is still attached
+        if configured.
+        """
+        files: list[discord.File] = []
+        if not google_docs_url:
+            files.append(build_minutes_file(minutes_md, date))
         if transcript_md:
             files.append(build_transcript_file(transcript_md, date))
         return files
@@ -229,11 +257,14 @@ async def post_minutes(
 
         # Step 1: Create thread with embed
         async def _create_thread():
-            result = await channel.create_thread(
+            kwargs: dict[str, Any] = dict(
                 name=thread_title,
                 content=mention_text,
                 embed=embed,
             )
+            if view is not None:
+                kwargs["view"] = view
+            result = await channel.create_thread(**kwargs)
             return result
 
         thread_result = await _send_with_retry(
@@ -242,12 +273,14 @@ async def post_minutes(
         thread = thread_result.thread
         message = thread_result.message
 
-        # Step 2: Send file(s) as a follow-up in the same thread
-        async def _send_files():
-            files = _build_files()
-            return await thread.send(files=files)
+        # Step 2: Send file(s) as a follow-up in the same thread (if any)
+        files_to_send = _build_files()
+        if files_to_send:
+            async def _send_files():
+                files = _build_files()
+                return await thread.send(files=files)
 
-        await _send_with_retry(_send_files, "Post minutes file(s) (forum thread)")
+            await _send_with_retry(_send_files, "Post minutes file(s) (forum thread)")
 
         logger.info(
             "Minutes posted to forum #%s as thread '%s' (message_id=%d, files=%d)",
@@ -261,7 +294,12 @@ async def post_minutes(
     async def _send():
         # Recreate Files each attempt (discord.py closes the buffer after send)
         files = _build_files()
-        return await channel.send(content=mention_text, embed=embed, files=files)
+        kwargs: dict[str, Any] = dict(
+            content=mention_text, embed=embed, files=files,
+        )
+        if view is not None:
+            kwargs["view"] = view
+        return await channel.send(**kwargs)
 
     message = await _send_with_retry(_send, "Post minutes")
     logger.info(

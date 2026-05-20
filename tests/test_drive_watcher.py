@@ -30,7 +30,7 @@ def _make_cfg(tmp_path: Path, **overrides) -> GoogleDriveConfig:
         folder_id="test-folder",
         credentials_path=str(tmp_path / "creds.json"),
         poll_interval_sec=1,
-        file_pattern="craig[_-]*.aac.zip",
+        file_pattern="craig[_-]*.zip",
     )
     defaults.update(overrides)
     return GoogleDriveConfig(**defaults)
@@ -134,21 +134,22 @@ class TestFilePatternMatching:
     """Tests for fnmatch-based file pattern filtering."""
 
     def test_matching_pattern(self) -> None:
-        """craig_12345.aac.zip and craig-12345.aac.zip match the default pattern."""
+        """craig_12345.zip, craig-12345.aac.zip etc. match the default pattern."""
         import fnmatch
 
-        pattern = "craig[_-]*.aac.zip"
+        pattern = "craig[_-]*.zip"
         assert fnmatch.fnmatch("craig_12345.aac.zip", pattern) is True
         assert fnmatch.fnmatch("craig_abc_def.aac.zip", pattern) is True
         assert fnmatch.fnmatch("craig-Q92fATPSYVKt_2026-3-2.aac.zip", pattern) is True
+        assert fnmatch.fnmatch("craig-ElIRZgL22aDQ-2026-03-21.zip", pattern) is True
+        assert fnmatch.fnmatch("craig-IGseKiVHcOMb-2026-03-23.zip", pattern) is True
 
     def test_non_matching_pattern(self) -> None:
         """Files that don't match the pattern are rejected."""
         import fnmatch
 
-        pattern = "craig[_-]*.aac.zip"
+        pattern = "craig[_-]*.zip"
         assert fnmatch.fnmatch("random.zip", pattern) is False
-        assert fnmatch.fnmatch("craig_12345.flac.zip", pattern) is False
         assert fnmatch.fnmatch("meeting_notes.aac.zip", pattern) is False
 
 

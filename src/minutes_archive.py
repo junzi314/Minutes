@@ -50,10 +50,16 @@ class MinutesArchive:
                 template_name TEXT DEFAULT 'minutes',
                 transcript_hash TEXT DEFAULT '',
                 minutes_md TEXT NOT NULL,
+                transcript_md TEXT DEFAULT '',
                 message_id INTEGER,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+
+        # Migration: add transcript_md column to existing databases
+        existing = {row[1] for row in cur.execute("PRAGMA table_info(minutes_archive)")}
+        if "transcript_md" not in existing:
+            cur.execute("ALTER TABLE minutes_archive ADD COLUMN transcript_md TEXT DEFAULT ''")
 
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_archive_guild ON minutes_archive(guild_id)"
@@ -98,6 +104,7 @@ class MinutesArchive:
         channel_name: str = "",
         template_name: str = "minutes",
         transcript_hash: str = "",
+        transcript_md: str = "",
         message_id: int | None = None,
     ) -> int:
         """Archive a minutes document. Returns the row id."""
@@ -105,8 +112,8 @@ class MinutesArchive:
             """
             INSERT INTO minutes_archive
                 (guild_id, source_label, date_str, speakers, channel_name,
-                 template_name, transcript_hash, minutes_md, message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 template_name, transcript_hash, minutes_md, transcript_md, message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
@@ -117,6 +124,7 @@ class MinutesArchive:
                 template_name,
                 transcript_hash,
                 minutes_md,
+                transcript_md,
                 message_id,
             ),
         )
