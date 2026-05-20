@@ -515,7 +515,7 @@ class TestTranscriptTab:
     def test_build_transcript_heading_style(self) -> None:
         """H3 timestamps generate HEADING_3 paragraph style."""
         exp = _make_exporter()
-        requests = exp._build_transcript_requests("### 00:03:00", "t.test")
+        requests, _ = exp._build_transcript_requests("### 00:03:00", "t.test")
 
         # Find updateParagraphStyle request
         heading_reqs = [r for r in requests if "updateParagraphStyle" in r]
@@ -526,7 +526,7 @@ class TestTranscriptTab:
     def test_build_transcript_h1_style(self) -> None:
         """H1 generates HEADING_1 paragraph style."""
         exp = _make_exporter()
-        requests = exp._build_transcript_requests("# 文字起こし", "t.test")
+        requests, _ = exp._build_transcript_requests("# 文字起こし", "t.test")
 
         heading_reqs = [r for r in requests if "updateParagraphStyle" in r]
         assert len(heading_reqs) >= 1
@@ -535,7 +535,7 @@ class TestTranscriptTab:
     def test_build_transcript_bold_speaker(self) -> None:
         """Speaker names are bolded."""
         exp = _make_exporter()
-        requests = exp._build_transcript_requests("**Alice:** Hello world", "t.test")
+        requests, _ = exp._build_transcript_requests("**Alice:** Hello world", "t.test")
 
         bold_reqs = [r for r in requests if "updateTextStyle" in r and r["updateTextStyle"].get("textStyle", {}).get("bold")]
         assert len(bold_reqs) >= 1
@@ -546,7 +546,7 @@ class TestTranscriptTab:
     def test_build_transcript_footer_style(self) -> None:
         """Footer generates italic + gray color style."""
         exp = _make_exporter()
-        requests = exp._build_transcript_requests("", "t.test")
+        requests, _ = exp._build_transcript_requests("", "t.test")
 
         # Footer is always appended (even for empty transcript)
         italic_reqs = [r for r in requests if "updateTextStyle" in r and r["updateTextStyle"].get("textStyle", {}).get("italic")]
@@ -558,7 +558,7 @@ class TestTranscriptTab:
     def test_build_transcript_empty_md(self) -> None:
         """Empty transcript produces only footer requests."""
         exp = _make_exporter()
-        requests = exp._build_transcript_requests("", "t.test")
+        requests, _ = exp._build_transcript_requests("", "t.test")
 
         insert_reqs = [r for r in requests if "insertText" in r]
         # Should have at least the empty line + footer
@@ -567,7 +567,7 @@ class TestTranscriptTab:
     def test_build_transcript_tab_id_scoping(self) -> None:
         """All requests include the correct tabId."""
         exp = _make_exporter()
-        requests = exp._build_transcript_requests(_SAMPLE_TRANSCRIPT, "t.myid")
+        requests, _ = exp._build_transcript_requests(_SAMPLE_TRANSCRIPT, "t.myid")
 
         for req in requests:
             if "insertText" in req:
@@ -581,7 +581,7 @@ class TestTranscriptTab:
         """Offsets are tracked correctly across multiple lines."""
         exp = _make_exporter()
         md = "# Title\n**Alice:** Hi\n**Bob:** Hey"
-        requests = exp._build_transcript_requests(md, "t.test")
+        requests, _ = exp._build_transcript_requests(md, "t.test")
 
         # Verify insertText requests have increasing, non-overlapping offsets
         insert_reqs = [r["insertText"] for r in requests if "insertText" in r]
@@ -706,6 +706,121 @@ class TestTimestampLinks:
         # Should have clean URL with ?tab= (not ?usp=...?tab=...)
         assert link_url == "https://docs.google.com/document/d/doc-123/edit?tab=t.abc456"
         assert "usp=" not in link_url
+
+    def test_update_timestamp_links_heading_match(self) -> None:
+        """Timestamps link to the matching heading via #heading= fragment.
+
+        Exact matches hit their own heading; off-boundary timestamps
+        floor-match to the nearest preceding heading.
+        """
+        exp = _make_exporter()
+
+        mock_docs = MagicMock()
+        mock_docs.documents().get.return_value.execute.return_value = {
+            "tabs": [{
+                "tabProperties": {"tabId": "t.0"},
+                "documentTab": {
+                    "body": {
+                        "content": [{
+                            "paragraph": {
+                                "elements": [{
+                                    "startIndex": 0,
+                                    "textRun": {
+                                        "content": (
+                                            "a [00:00:00] b [00:01:24] "
+                                            "c [00:02:26] d [00:04:52]"
+                                        ),
+                                    },
+                                }]
+                            }
+                        }]
+                    }
+                }
+            }],
+        }
+        mock_docs.documents().batchUpdate.return_value.execute.return_value = {}
+        exp._docs_service = mock_docs
+
+        heading_ids = {
+            "00:00:00": "h.zero",
+            "00:01:24": "h.one",
+            "00:02:26": "h.two",
+        }
+        exp._update_timestamp_links_sync(
+            "doc-1", "t.tx",
+            "https://docs.google.com/document/d/doc-1/edit",
+            heading_ids=heading_ids,
+        )
+
+        body = mock_docs.documents().batchUpdate.call_args[1]["body"]
+        urls = [
+            r["updateTextStyle"]["textStyle"]["link"]["url"]
+            for r in body["requests"]
+        ]
+        base = "https://docs.google.com/document/d/doc-1/edit?tab=t.tx"
+        assert urls == [
+            f"{base}#heading=h.zero",  # 00:00:00 → exact
+            f"{base}#heading=h.one",   # 00:01:24 → exact
+            f"{base}#heading=h.two",   # 00:02:26 → exact
+            f"{base}#heading=h.two",   # 00:04:52 → floor to two
+        ]
+
+    def test_fetch_heading_ids_sync(self) -> None:
+        """Heading IDs are extracted from the transcript tab."""
+        exp = _make_exporter()
+
+        mock_docs = MagicMock()
+        mock_docs.documents().get.return_value.execute.return_value = {
+            "tabs": [
+                {"tabProperties": {"tabId": "t.0"}},  # memo tab, ignored
+                {
+                    "tabProperties": {"tabId": "t.transcript"},
+                    "documentTab": {
+                        "body": {
+                            "content": [
+                                {
+                                    "paragraph": {
+                                        "paragraphStyle": {
+                                            "namedStyleType": "HEADING_1",
+                                            "headingId": "h.title",
+                                        },
+                                        "elements": [
+                                            {"textRun": {"content": "文字起こし\n"}}
+                                        ],
+                                    }
+                                },
+                                {
+                                    "paragraph": {
+                                        "paragraphStyle": {
+                                            "namedStyleType": "HEADING_3",
+                                            "headingId": "h.ts1",
+                                        },
+                                        "elements": [
+                                            {"textRun": {"content": "00:01:24\n"}}
+                                        ],
+                                    }
+                                },
+                                {
+                                    "paragraph": {
+                                        "paragraphStyle": {
+                                            "namedStyleType": "NORMAL_TEXT",
+                                        },
+                                        "elements": [
+                                            {"textRun": {"content": "**Alice:** hi\n"}}
+                                        ],
+                                    }
+                                },
+                            ]
+                        }
+                    },
+                },
+            ],
+        }
+        exp._docs_service = mock_docs
+
+        result = exp._fetch_heading_ids_sync("doc-1", "t.transcript")
+
+        assert result == {"00:01:24": "h.ts1"}
 
     @pytest.mark.asyncio
     async def test_export_calls_link_update_after_tab(self) -> None:

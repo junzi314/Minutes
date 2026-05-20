@@ -279,9 +279,25 @@ class GoogleDocsExporter:
         ).execute()
         return result["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
 
+    @staticmethod
+    def _normalize_timestamp(ts: str) -> str:
+        """Convert MM:SS or M:SS to HH:MM:SS for matching tab-2 headings."""
+        parts = ts.split(":")
+        if len(parts) == 2:
+            return f"00:{parts[0].zfill(2)}:{parts[1].zfill(2)}"
+        return ":".join(p.zfill(2) for p in parts)
+
+    @staticmethod
+    def _ts_to_seconds(ts: str) -> int:
+        """Parse MM:SS or HH:MM:SS into total seconds."""
+        parts = [int(p) for p in ts.split(":")]
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
     def _build_transcript_requests(
         self, transcript_md: str, tab_id: str,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, tuple[int, int]]]:
         """Convert transcript markdown to Google Docs API batchUpdate requests.
 
         Parses line-by-line:
@@ -291,13 +307,16 @@ class GoogleDocsExporter:
           - ``- metadata``       -> insertText (NORMAL_TEXT)
           - plain text / blank   -> insertText (NORMAL_TEXT)
 
-        Returns ordered requests for forward insertion starting at index 1.
+        Returns (requests, heading_offsets) where heading_offsets maps
+        ``HH:MM:SS`` timestamp strings to ``(start_index, end_index)`` tuples
+        (excluding the trailing newline) for use with createNamedRange.
         """
         re_h1 = re.compile(r"^# (.+)$")
         re_h3 = re.compile(r"^### (.+)$")
         re_speaker = re.compile(r"^\*\*(.+?):\*\*\s*(.*)$")
 
         requests: list[dict[str, Any]] = []
+        heading_offsets: dict[str, tuple[int, int]] = {}
         offset = 1  # New tab starts at index 1
 
         lines = transcript_md.splitlines()
@@ -328,8 +347,10 @@ class GoogleDocsExporter:
                 offset += text_len
 
             elif m_h3:
-                text = m_h3.group(1) + "\n"
+                ts_text = m_h3.group(1)
+                text = ts_text + "\n"
                 text_len = self._utf16_len(text)
+                heading_offsets[ts_text] = (offset, offset + text_len - 1)
                 requests.append({
                     "insertText": {
                         "text": text,
@@ -416,15 +437,19 @@ class GoogleDocsExporter:
             }
         })
 
-        return requests
+        return requests, heading_offsets
 
     def _write_transcript_content_sync(
         self, doc_id: str, tab_id: str, transcript_md: str,
-    ) -> None:
-        """Write formatted transcript content into the specified tab."""
-        requests = self._build_transcript_requests(transcript_md, tab_id)
+    ) -> dict[str, tuple[int, int]]:
+        """Write formatted transcript content into the specified tab.
+
+        Returns heading_offsets mapping HH:MM:SS timestamp strings to
+        (start_index, end_index) for subsequent named range creation.
+        """
+        requests, heading_offsets = self._build_transcript_requests(transcript_md, tab_id)
         if not requests:
-            return
+            return {}
 
         # Google Docs API allows up to 200 requests per batchUpdate
         batch_size = 200
@@ -435,18 +460,81 @@ class GoogleDocsExporter:
                 documentId=doc_id,
                 body={"requests": chunk},
             ).execute()
+        return heading_offsets
+
+    def _fetch_heading_ids_sync(
+        self, doc_id: str, tab_id: str,
+    ) -> dict[str, str]:
+        """Read back the transcript tab and extract heading IDs.
+
+        Google Docs auto-assigns a ``headingId`` (e.g. ``h.xxxxx``) to each
+        heading paragraph.  That ID is what URL fragments like
+        ``#heading=h.xxxxx`` navigate to — named ranges are *not*
+        addressable via URL.
+
+        Returns a dict mapping heading text (e.g. ``00:01:24``) to
+        ``headingId``.
+        """
+        docs_service = self._build_docs_service()
+        doc = docs_service.documents().get(
+            documentId=doc_id,
+            includeTabsContent=True,
+        ).execute()
+
+        result: dict[str, str] = {}
+        for tab in doc.get("tabs", []):
+            if tab.get("tabProperties", {}).get("tabId") != tab_id:
+                continue
+            body_content = (
+                tab.get("documentTab", {}).get("body", {}).get("content", [])
+            )
+            for element in body_content:
+                paragraph = element.get("paragraph")
+                if not paragraph:
+                    continue
+                style = paragraph.get("paragraphStyle", {})
+                if style.get("namedStyleType", "") != "HEADING_3":
+                    continue
+                heading_id = style.get("headingId")
+                if not heading_id:
+                    continue
+                text = "".join(
+                    pe.get("textRun", {}).get("content", "")
+                    for pe in paragraph.get("elements", [])
+                ).strip()
+                if text:
+                    result[text] = heading_id
+            break
+        logger.debug("Fetched %d heading IDs from transcript tab", len(result))
+        return result
 
     def _update_timestamp_links_sync(
-        self, doc_id: str, tab_id: str, doc_url: str,
+        self,
+        doc_id: str,
+        tab_id: str,
+        doc_url: str,
+        heading_ids: dict[str, str] | None = None,
     ) -> None:
         """Add transcript tab links to timestamp text in the memo tab.
 
         Reads the memo tab (t.0), finds timestamp patterns like ``[01:29]``,
         and adds a hyperlink to the transcript tab using ``updateTextStyle``.
+        When *heading_ids* is provided (mapping ``HH:MM:SS`` → ``h.xxx``),
+        each timestamp is linked to the nearest preceding heading (floor
+        match) via ``#heading=h.xxx``.  Exact matches resolve directly;
+        floor match handles any off-boundary references.
         """
         # Build tab URL: strip existing query params, add ?tab=
         base_url = doc_url.split("?")[0]
         target_url = f"{base_url}?tab={tab_id}"
+
+        # Pre-sort heading IDs by time for floor-match lookup
+        sorted_headings: list[tuple[int, str]] = []
+        if heading_ids:
+            sorted_headings = sorted(
+                (self._ts_to_seconds(ts), hid)
+                for ts, hid in heading_ids.items()
+            )
 
         docs_service = self._build_docs_service()
 
@@ -470,7 +558,7 @@ class GoogleDocsExporter:
             return
 
         # Extract full text with character offsets
-        ts_pattern = re.compile(r"\[[\d:]+\]")
+        ts_pattern = re.compile(r"\[([\d:]+)\]")
         requests: list[dict[str, Any]] = []
 
         for element in body_content:
@@ -486,10 +574,24 @@ class GoogleDocsExporter:
                 for m in ts_pattern.finditer(text):
                     abs_start = start_idx + m.start()
                     abs_end = start_idx + m.end()
+
+                    # Floor-match to nearest preceding heading
+                    ts_secs = self._ts_to_seconds(m.group(1))
+                    heading_id: str | None = None
+                    for sec, hid in sorted_headings:
+                        if sec <= ts_secs:
+                            heading_id = hid
+                        else:
+                            break
+                    if heading_id:
+                        link_url = f"{base_url}?tab={tab_id}#heading={heading_id}"
+                    else:
+                        link_url = target_url
+
                     requests.append({
                         "updateTextStyle": {
                             "textStyle": {
-                                "link": {"url": target_url},
+                                "link": {"url": link_url},
                             },
                             "range": {
                                 "segmentId": "",
@@ -680,8 +782,20 @@ class GoogleDocsExporter:
                     self._write_transcript_content_sync,
                     doc_id, tab_id, transcript_md,
                 )
+
+                heading_ids: dict[str, str] = {}
+                try:
+                    heading_ids = await asyncio.to_thread(
+                        self._fetch_heading_ids_sync, doc_id, tab_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Heading ID fetch failed (non-critical): %s", exc
+                    )
+
                 await asyncio.to_thread(
-                    self._update_timestamp_links_sync, doc_id, tab_id, url,
+                    self._update_timestamp_links_sync,
+                    doc_id, tab_id, url, heading_ids or None,
                 )
                 # Convert Unicode checkboxes to native Google Docs checklists
                 try:
