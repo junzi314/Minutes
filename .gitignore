@@ -11,3 +11,9 @@ build/
 .pytest_cache/
 venv/
 samples/
+
+# Claude Code / RPI workflow artifacts (not needed for runtime)
+.claude/
+CLAUDE.md
+rpi/
+reports/
