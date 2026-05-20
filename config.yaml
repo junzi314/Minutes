@@ -20,6 +20,14 @@ discord:
       # google_drive:
       #   enabled: true
       #   folder_id: "per_guild_drive_folder_id"
+      # Per-folder routing: list of {folder_id, output_channel_id}.
+      # When set, takes precedence over the global google_drive folder_id
+      # and runs one watcher per entry, posting minutes to the listed channel.
+      drive_folders:
+        - folder_id: "18JpLtd8T_fzGOnHUei6cAO0NWty_qgSD"
+          output_channel_id: 1395775686924570655
+        - folder_id: "1In5Y_XCuB7Xp4uCODqxI3dyJwEIgGRrl"
+          output_channel_id: 1505965510641061959
 
   # Role ID to mention when errors occur (optional, global fallback)
   error_mention_role_id: null

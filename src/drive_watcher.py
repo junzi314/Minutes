@@ -69,6 +69,11 @@ class DriveWatcher:
         """Whether the polling task is currently running."""
         return self._task is not None and not self._task.done()
 
+    @property
+    def folder_id(self) -> str:
+        """Drive folder ID this watcher is polling."""
+        return self._cfg.folder_id
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

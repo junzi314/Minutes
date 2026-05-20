@@ -135,7 +135,7 @@ class MinutesBot(discord.Client):
         self.archive = archive
         self.exporter = exporter
         self.http_session: aiohttp.ClientSession | None = None
-        self.drive_watchers: dict[int, DriveWatcher] = {}
+        self.drive_watchers: dict[int, list[DriveWatcher]] = {}
         self._start_time = time.monotonic()
         super().__init__(**kwargs)
         self.tree = discord.app_commands.CommandTree(self)
@@ -147,8 +147,9 @@ class MinutesBot(discord.Client):
 
     async def close(self) -> None:
         """Clean up resources on shutdown."""
-        for watcher in self.drive_watchers.values():
-            watcher.stop()
+        for watchers in self.drive_watchers.values():
+            for watcher in watchers:
+                watcher.stop()
         if self.archive is not None:
             self.archive.close()
         if self.http_session and not self.http_session.closed:
@@ -213,14 +214,33 @@ class MinutesBot(discord.Client):
     def _start_drive_watchers(self) -> None:
         """Start per-guild Google Drive watchers based on config.
 
-        For each guild, resolve Drive settings (guild-level overrides or
-        global fallback) and create a DriveWatcher with a callback bound
-        to that guild's output channel.
+        Routing precedence per guild:
+          1. ``drive_folders`` (list of folder→channel routes) — one watcher
+             per entry, each posting to its own ``output_channel_id``.
+          2. Otherwise, legacy single-folder mode: ``guilds[].google_drive``
+             or global ``google_drive`` → guild's ``output_channel_id``.
         """
         global_drive = self.cfg.google_drive
 
         for gcfg in self.cfg.discord.guilds:
-            # Resolve per-guild Drive config
+            if gcfg.drive_folders:
+                # New multi-folder routing mode
+                if gcfg.google_drive and gcfg.google_drive.enabled:
+                    logger.warning(
+                        "Guild %d: both drive_folders and google_drive are set; "
+                        "google_drive is ignored. Remove the per-guild google_drive "
+                        "section to clean up the config.",
+                        gcfg.guild_id,
+                    )
+                for route in gcfg.drive_folders:
+                    self._start_one_drive_watcher(
+                        gcfg=gcfg,
+                        folder_id=route.folder_id,
+                        output_channel_id=route.output_channel_id,
+                    )
+                continue
+
+            # Legacy single-folder mode
             guild_drive = gcfg.google_drive
             if guild_drive is not None:
                 enabled = guild_drive.enabled
@@ -232,65 +252,98 @@ class MinutesBot(discord.Client):
             if not enabled or not folder_id:
                 continue
 
-            output_channel = self._get_output_channel_for_guild(gcfg)
-            if output_channel is None:
-                logger.error(
-                    "Output channel %d not found for guild %d, Drive watcher will not start",
-                    gcfg.output_channel_id,
-                    gcfg.guild_id,
-                )
-                continue
-
-            # Build a DriveWatcher config using guild folder_id + global shared settings
-            watcher_cfg = GoogleDriveConfig(
-                enabled=True,
-                credentials_path=global_drive.credentials_path,
+            self._start_one_drive_watcher(
+                gcfg=gcfg,
                 folder_id=folder_id,
-                file_pattern=global_drive.file_pattern,
-                poll_interval_sec=global_drive.poll_interval_sec,
+                output_channel_id=gcfg.output_channel_id,
             )
 
-            # Closure captures gcfg and output_channel for this guild
-            _guild_cfg = gcfg
-            _out_ch = output_channel
+    def _start_one_drive_watcher(
+        self,
+        *,
+        gcfg: GuildConfig,
+        folder_id: str,
+        output_channel_id: int,
+    ) -> None:
+        """Spawn a single DriveWatcher for a (guild, folder, channel) triple.
 
-            async def _on_drive_tracks(
-                tracks: list[SpeakerAudio],
-                source_label: str,
-                tmp_dir: Path,
-                *,
-                _gcfg: GuildConfig = _guild_cfg,
-                _channel: OutputChannel = _out_ch,
-            ) -> None:
-                template_name = self.resolve_template(_gcfg.guild_id)
-                error_role = self.cfg.discord.resolve_error_role(_gcfg.guild_id)
-                await run_pipeline_from_tracks(
-                    tracks=tracks,
-                    cfg=self.cfg,
-                    transcriber=self.transcriber,
-                    generator=self.generator,
-                    output_channel=_channel,
-                    state_store=self.state_store,
-                    source_label=source_label,
-                    template_name=template_name,
-                    archive=self.archive,
-                    exporter=self.exporter,
-                    error_mention_role_id=error_role,
-                )
+        If ``output_channel_id`` is 0 or cannot be resolved (channel deleted /
+        bot lacks access), the watcher still starts and processes recordings
+        through transcription, minutes generation, Google Docs export, and
+        archive — only Discord posting is skipped.
+        """
+        global_drive = self.cfg.google_drive
 
-            watcher = DriveWatcher(
-                cfg=watcher_cfg,
-                state_store=self.state_store,
-                on_new_tracks=_on_drive_tracks,
-            )
-            watcher.start()
-            self.drive_watchers[gcfg.guild_id] = watcher
+        output_channel: OutputChannel | None
+        if output_channel_id == 0:
+            output_channel = None
             logger.info(
-                "Google Drive watcher started for guild %d (folder=%s, output=%d)",
+                "Guild %d folder=%s: output_channel_id=0, "
+                "Drive watcher will run without Discord posting",
                 gcfg.guild_id,
                 folder_id,
-                gcfg.output_channel_id,
             )
+        else:
+            ch = self.get_channel(output_channel_id)
+            if isinstance(ch, (discord.TextChannel, discord.ForumChannel)):
+                output_channel = ch
+            else:
+                output_channel = None
+                logger.warning(
+                    "Output channel %d not found for guild %d (folder=%s); "
+                    "Drive watcher will run without Discord posting",
+                    output_channel_id,
+                    gcfg.guild_id,
+                    folder_id,
+                )
+
+        watcher_cfg = GoogleDriveConfig(
+            enabled=True,
+            credentials_path=global_drive.credentials_path,
+            folder_id=folder_id,
+            file_pattern=global_drive.file_pattern,
+            poll_interval_sec=global_drive.poll_interval_sec,
+        )
+
+        guild_obj = self.get_guild(gcfg.guild_id)
+        guild_name = guild_obj.name if guild_obj else ""
+
+        async def _on_drive_tracks(
+            tracks: list[SpeakerAudio],
+            source_label: str,
+            tmp_dir: Path,
+        ) -> None:
+            template_name = self.resolve_template(gcfg.guild_id)
+            error_role = self.cfg.discord.resolve_error_role(gcfg.guild_id)
+            await run_pipeline_from_tracks(
+                tracks=tracks,
+                cfg=self.cfg,
+                transcriber=self.transcriber,
+                generator=self.generator,
+                output_channel=output_channel,
+                state_store=self.state_store,
+                source_label=source_label,
+                template_name=template_name,
+                archive=self.archive,
+                exporter=self.exporter,
+                error_mention_role_id=error_role,
+                guild_id=gcfg.guild_id,
+                guild_name=guild_name,
+            )
+
+        watcher = DriveWatcher(
+            cfg=watcher_cfg,
+            state_store=self.state_store,
+            on_new_tracks=_on_drive_tracks,
+        )
+        watcher.start()
+        self.drive_watchers.setdefault(gcfg.guild_id, []).append(watcher)
+        logger.info(
+            "Google Drive watcher started for guild %d (folder=%s, output=%d)",
+            gcfg.guild_id,
+            folder_id,
+            output_channel_id,
+        )
 
     async def on_raw_message_update(
         self, payload: discord.RawMessageUpdateEvent
@@ -491,29 +544,26 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
     async def minutes_drive_status(interaction: discord.Interaction) -> None:
         guild_id = interaction.guild_id or 0
         gdcfg = client.cfg.google_drive
-        watcher = client.drive_watchers.get(guild_id)
+        watchers = client.drive_watchers.get(guild_id, [])
 
         lines: list[str] = []
 
-        if watcher is not None:
-            running = watcher.is_running
-            # Get folder_id from the watcher's config
-            guild_cfg = client.cfg.discord.get_guild(guild_id)
-            guild_drive = guild_cfg.google_drive if guild_cfg else None
-            folder_id = (
-                (guild_drive.folder_id if guild_drive and guild_drive.folder_id else None)
-                or gdcfg.folder_id
-            )
-            lines.append(f"**このギルドのDrive監視**: {'running' if running else 'stopped'}")
-            lines.append(f"**Folder ID**: `{folder_id or '(not set)'}`")
+        if watchers:
+            lines.append(f"**このギルドのDrive監視**: {len(watchers)} watcher(s)")
+            for w in watchers:
+                running = w.is_running
+                lines.append(
+                    f"- `{w.folder_id}` → {'running' if running else 'stopped'}"
+                )
         else:
             lines.append("**このギルドのDrive監視**: 無効")
 
         # Global info
-        total_running = sum(1 for w in client.drive_watchers.values() if w.is_running)
-        total_watchers = len(client.drive_watchers)
+        all_watchers = [w for ws in client.drive_watchers.values() for w in ws]
+        total_running = sum(1 for w in all_watchers if w.is_running)
+        total_watchers = len(all_watchers)
         if total_watchers > 0:
-            lines.append(f"**全体**: {total_running}/{total_watchers} ギルド稼働中")
+            lines.append(f"**全体**: {total_running}/{total_watchers} watcher稼働中")
         lines.append(f"**File pattern**: `{gdcfg.file_pattern}`")
         lines.append(f"**Poll interval**: {gdcfg.poll_interval_sec}s")
         lines.append(f"**Processed files**: {client.state_store.processing_count}")

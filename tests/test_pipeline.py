@@ -732,6 +732,75 @@ class TestPipelineArchive:
         mock_archive.store.assert_not_called()
 
 
+class TestPipelineNoChannel:
+    """Pipeline must still transcribe + generate + archive when output_channel is None."""
+
+    @pytest.mark.asyncio
+    async def test_runs_without_channel(
+        self,
+        cfg: Config,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        from src.minutes_archive import MinutesArchive
+
+        tracks = _make_tracks(tmp_path)
+        archive = MinutesArchive(tmp_path / "archive.db")
+
+        with patch("src.pipeline.post_minutes", new_callable=AsyncMock) as mock_post:
+            await run_pipeline_from_tracks(
+                tracks=tracks,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=mock_generator,
+                output_channel=None,
+                state_store=state_store,
+                source_label="test-no-channel",
+                archive=archive,
+                guild_id=42,
+                guild_name="TestGuild",
+            )
+
+        # Discord post was NOT attempted
+        mock_post.assert_not_called()
+        # But transcription + generation + archive still ran
+        mock_transcriber.transcribe_all.assert_called_once_with(tracks)
+        mock_generator.generate.assert_called_once()
+        assert archive.count(42) == 1
+        archive.close()
+
+    @pytest.mark.asyncio
+    async def test_no_channel_no_post_error_on_failure(
+        self,
+        cfg: Config,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        state_store: StateStore,
+        tmp_path: Path,
+    ) -> None:
+        """When output_channel is None and generation fails, post_error is skipped."""
+        from src.errors import GenerationError
+
+        tracks = _make_tracks(tmp_path)
+        mock_generator.generate.side_effect = GenerationError("boom")
+
+        with patch("src.pipeline.post_error", new_callable=AsyncMock) as mock_post_err:
+            with pytest.raises(GenerationError):
+                await run_pipeline_from_tracks(
+                    tracks=tracks,
+                    cfg=cfg,
+                    transcriber=mock_transcriber,
+                    generator=mock_generator,
+                    output_channel=None,
+                    state_store=state_store,
+                    guild_id=42,
+                )
+
+        mock_post_err.assert_not_called()
+
+
 class TestPipelineErrorRoleParam:
     @pytest.mark.asyncio
     async def test_error_role_param_passed_to_post_error(

@@ -5,8 +5,6 @@
 
 ## 会議情報
 - 日時: {date}
-- サーバー: {guild_name}
-- チャンネル: {channel_name}
 - 参加者: {speakers}
 - 会議名: {event_title}
 - カレンダー参加者: {event_attendees}

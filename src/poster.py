@@ -363,20 +363,22 @@ async def post_error(
 
 
 async def send_status_update(
-    channel: OutputChannel,
+    channel: OutputChannel | None,
     message: discord.Message | None,
     status_text: str,
 ) -> discord.Message | None:
     """Create or edit a status message in the channel.
 
-    If *message* is None, sends a new message. Otherwise edits the existing one.
-    Returns the message object, or None if the initial send fails. Failures are
-    logged but do not raise -- status messages are non-critical.
+    If *channel* is None, the call is a no-op (used when Discord posting is
+    disabled for this pipeline run). If *message* is None, sends a new message;
+    otherwise edits the existing one. Returns the message object, or None if
+    the send fails or no channel is given. Failures are logged but do not
+    raise -- status messages are non-critical.
 
     For ForumChannel, status updates are silently skipped since forum channels
     do not support direct messages (threads are created only for final output).
     """
-    if isinstance(channel, discord.ForumChannel):
+    if channel is None or isinstance(channel, discord.ForumChannel):
         return None
 
     try:
