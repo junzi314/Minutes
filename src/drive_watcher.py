@@ -293,11 +293,12 @@ class DriveWatcher:
                 # List files (synchronous, run in executor)
                 files = await loop.run_in_executor(None, self._list_files_sync)
 
-                # Filter out already-known files via StateStore
+                # Filter out files already claimed (in-flight, succeeded, or
+                # failed with retries exhausted). Retryable failures pass through.
                 new_files: list[dict[str, str]] = []
                 for f in files:
                     rec_id = extract_rec_id(f["name"]) or f["id"]
-                    if not self._state_store.is_known(rec_id):
+                    if not self._state_store.is_claimed(rec_id):
                         new_files.append(f)
 
                 if new_files:

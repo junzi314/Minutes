@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import zipfile
 from pathlib import Path
 
@@ -24,6 +25,18 @@ logger = logging.getLogger(__name__)
 
 # Polling interval for job readiness checks (seconds)
 _JOB_POLL_INTERVAL = 2
+
+# outputFileName comes from the server's job response and is interpolated into
+# the /dl/ URL, so restrict it to a safe single path segment (no path
+# separators, traversal, query, or scheme characters).
+_SAFE_OUTPUT_FILENAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _is_safe_output_filename(name: str) -> bool:
+    """Return True if ``name`` is a safe single path segment for the /dl/ URL."""
+    if not name or name in (".", ".."):
+        return False
+    return _SAFE_OUTPUT_FILENAME.fullmatch(name) is not None
 
 
 class CraigClient(AudioSource):
@@ -82,6 +95,10 @@ class CraigClient(AudioSource):
 
         # Step 2: Poll until job completes -> returns outputFileName
         output_filename = await self._poll_until_complete(job_url)
+        if not _is_safe_output_filename(output_filename):
+            raise AudioAcquisitionError(
+                f"Unsafe outputFileName from Craig job: {output_filename!r}"
+            )
 
         # Step 3: Download the cooked ZIP file
         dl_url = f"{self._base_url}/dl/{output_filename}"

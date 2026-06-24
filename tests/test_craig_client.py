@@ -13,9 +13,26 @@ from aioresponses import aioresponses
 from src.audio_source import SpeakerAudio, SpeakerInfo
 from src.config import CraigConfig
 from src.audio_source import ZIP_FILENAME_PATTERN
-from src.craig_client import CraigClient
+from src.craig_client import CraigClient, _is_safe_output_filename
 from src.detector import DetectedRecording
 from src.errors import AudioAcquisitionError, CookTimeoutError
+
+
+class TestSafeOutputFilename:
+    """The server-supplied outputFileName is interpolated into the download URL,
+    so it must be validated to prevent path traversal / request redirection (S2)."""
+
+    def test_accepts_normal_names(self) -> None:
+        assert _is_safe_output_filename("rec-abc_123.zip")
+        assert _is_safe_output_filename("craig_output.aac")
+
+    def test_rejects_traversal_and_separators(self) -> None:
+        assert not _is_safe_output_filename("../etc/passwd")
+        assert not _is_safe_output_filename("a/b.zip")
+        assert not _is_safe_output_filename("a\\b.zip")
+        assert not _is_safe_output_filename("file?x=1")
+        assert not _is_safe_output_filename("with space.zip")
+        assert not _is_safe_output_filename("")
 
 
 # --- Fixtures ---

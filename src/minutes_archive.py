@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +32,11 @@ class MinutesArchive:
         - Creates tables on first run
         """
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
+        # check_same_thread=False because the bot calls search()/count() via
+        # asyncio.to_thread (worker threads) while store() runs on the event-loop
+        # thread. A single lock serializes all access to the shared connection.
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
         logger.info("MinutesArchive opened at %s", db_path)
@@ -108,28 +113,29 @@ class MinutesArchive:
         message_id: int | None = None,
     ) -> int:
         """Archive a minutes document. Returns the row id."""
-        cur = self._conn.execute(
-            """
-            INSERT INTO minutes_archive
-                (guild_id, source_label, date_str, speakers, channel_name,
-                 template_name, transcript_hash, minutes_md, transcript_md, message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                guild_id,
-                source_label,
-                date_str,
-                speakers,
-                channel_name,
-                template_name,
-                transcript_hash,
-                minutes_md,
-                transcript_md,
-                message_id,
-            ),
-        )
-        self._conn.commit()
-        row_id = cur.lastrowid or -1
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO minutes_archive
+                    (guild_id, source_label, date_str, speakers, channel_name,
+                     template_name, transcript_hash, minutes_md, transcript_md, message_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    guild_id,
+                    source_label,
+                    date_str,
+                    speakers,
+                    channel_name,
+                    template_name,
+                    transcript_hash,
+                    minutes_md,
+                    transcript_md,
+                    message_id,
+                ),
+            )
+            self._conn.commit()
+            row_id = cur.lastrowid or -1
         logger.info(
             "Archived minutes id=%d guild=%d date=%s", row_id, guild_id, date_str
         )
@@ -153,20 +159,21 @@ class MinutesArchive:
 
         # Trigram tokenizer requires at least 3 characters
         if len(q) >= 3:
-            cur = self._conn.execute(
-                """
-                SELECT
-                    a.id, a.date_str, a.speakers,
-                    snippet(minutes_fts, 0, '', '', '...', 40) AS snippet,
-                    rank
-                FROM minutes_fts
-                JOIN minutes_archive a ON a.id = minutes_fts.rowid
-                WHERE minutes_fts MATCH ? AND a.guild_id = ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (q, guild_id, limit),
-            )
+            with self._lock:
+                rows = self._conn.execute(
+                    """
+                    SELECT
+                        a.id, a.date_str, a.speakers,
+                        snippet(minutes_fts, 0, '', '', '...', 40) AS snippet,
+                        rank
+                    FROM minutes_fts
+                    JOIN minutes_archive a ON a.id = minutes_fts.rowid
+                    WHERE minutes_fts MATCH ? AND a.guild_id = ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (q, guild_id, limit),
+                ).fetchall()
             return [
                 SearchResult(
                     id=row[0],
@@ -175,23 +182,24 @@ class MinutesArchive:
                     snippet=row[3],
                     rank=row[4],
                 )
-                for row in cur.fetchall()
+                for row in rows
             ]
 
         # Fallback for short queries (< 3 chars): LIKE on both columns
         pattern = f"%{q}%"
-        cur = self._conn.execute(
-            """
-            SELECT id, date_str, speakers, minutes_md, 0.0 AS rank
-            FROM minutes_archive
-            WHERE guild_id = ? AND (minutes_md LIKE ? OR speakers LIKE ?)
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (guild_id, pattern, pattern, limit),
-        )
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, date_str, speakers, minutes_md, 0.0 AS rank
+                FROM minutes_archive
+                WHERE guild_id = ? AND (minutes_md LIKE ? OR speakers LIKE ?)
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (guild_id, pattern, pattern, limit),
+            ).fetchall()
         results: list[SearchResult] = []
-        for row in cur.fetchall():
+        for row in rows:
             # Build a simple snippet around the match
             md: str = row[3]
             idx = md.find(q)
@@ -209,13 +217,15 @@ class MinutesArchive:
 
     def count(self, guild_id: int) -> int:
         """Return the number of archived minutes for a guild."""
-        cur = self._conn.execute(
-            "SELECT COUNT(*) FROM minutes_archive WHERE guild_id = ?",
-            (guild_id,),
-        )
-        return cur.fetchone()[0]
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM minutes_archive WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return row[0]
 
     def close(self) -> None:
         """Close the database connection."""
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
         logger.info("MinutesArchive closed")
