@@ -12,6 +12,17 @@ build/
 venv/
 samples/
 
+# Secrets / credentials (NEVER commit)
+token.json
+oauth_client.json
+.oauth_state.json
+
+# Runtime artifacts & meeting data (may contain PII)
+output/
+recovered/
+state/
+*.bak
+
 # Claude Code / RPI workflow artifacts (not needed for runtime)
 .claude/
 CLAUDE.md

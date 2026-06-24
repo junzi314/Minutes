@@ -48,8 +48,10 @@ class StateStore:
         self,
         state_dir: Path,
         legacy_db_path: Path | None = None,
+        max_attempts: int = 3,
     ) -> None:
         self._state_dir = state_dir
+        self._max_attempts = max_attempts
         self._processing_path = state_dir / "processing.json"
         self._cache_path = state_dir / "minutes_cache.json"
 
@@ -90,17 +92,30 @@ class StateStore:
     ) -> bool:
         """Atomically claim a recording for processing.
 
-        Returns True if the claim succeeded (rec_id was not previously known).
-        Returns False if rec_id is already known (any status).
+        Returns True if the claim succeeded:
+          - a fresh rec_id is always claimable;
+          - a rec_id that previously *failed* is re-claimable for a bounded
+            retry, until it has been attempted ``max_attempts`` times.
+        Returns False if the rec_id is currently ``processing``, already
+        ``success``, or has exhausted its retry budget.
         """
-        if rec_id in self._processing:
-            return False
+        entry = self._processing.get(rec_id)
+        if entry is not None:
+            status = entry.get("status")
+            attempts = entry.get("attempts", 1)
+            if not (status == "error" and attempts < self._max_attempts):
+                # processing / success / unknown status, or retries exhausted
+                return False
+            new_attempts = attempts + 1
+        else:
+            new_attempts = 1
 
         self._processing[rec_id] = {
             "source": source,
             "source_id": source_id,
             "file_name": file_name,
             "status": "processing",
+            "attempts": new_attempts,
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
         self._flush_processing()
@@ -145,6 +160,23 @@ class StateStore:
     def is_known(self, rec_id: str) -> bool:
         """Check if a rec_id has been seen before (any status)."""
         return rec_id in self._processing
+
+    def is_claimed(self, rec_id: str) -> bool:
+        """Return True if the recording should NOT be (re)processed.
+
+        A recording is "claimed" when it is currently processing, has already
+        succeeded, or has failed and exhausted its retry budget. A previously
+        failed recording that still has retries left returns False (it should be
+        retried), as does an unknown recording. Use this — not ``is_known`` —
+        to decide whether to start a pipeline.
+        """
+        entry = self._processing.get(rec_id)
+        if entry is None:
+            return False
+        if entry.get("status") == "error":
+            return entry.get("attempts", 1) >= self._max_attempts
+        # processing / success / any other status -> claimed
+        return True
 
     def get_entry(self, rec_id: str) -> dict | None:
         """Return a copy of the processing entry, or None."""

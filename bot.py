@@ -20,7 +20,12 @@ import discord
 
 from src.audio_source import SpeakerAudio
 from src.config import Config, GoogleDriveConfig, GuildConfig, load
-from src.detector import DetectedRecording, RECORDING_URL_PATTERN, parse_recording_ended
+from src.detector import (
+    DetectedRecording,
+    RECORDING_URL_PATTERN,
+    is_allowed_craig_domain,
+    parse_recording_ended,
+)
 from src.drive_watcher import DriveWatcher
 from src.errors import MinutesBotError
 from src.generator import MinutesGenerator
@@ -487,13 +492,18 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     @group.command(name="process", description="Process a Craig recording URL")
-    @discord.app_commands.describe(url="Craig recording URL (e.g. https://craig.chat/rec/abc?key=xyz)")
+    @discord.app_commands.checks.has_permissions(manage_guild=True)
+    @discord.app_commands.describe(url="Craig recording URL (e.g. https://craig.horse/rec/abc?key=xyz)")
     async def minutes_process(interaction: discord.Interaction, url: str) -> None:
+        # Defer immediately to honor Discord's 3-second ACK window; every reply
+        # below uses followup.send.
+        await interaction.response.defer(ephemeral=True)
+
         # Parse the URL
         match = RECORDING_URL_PATTERN.search(url)
         if not match:
-            await interaction.response.send_message(
-                "Invalid Craig recording URL. Expected format: `https://craig.chat/rec/{id}?key={key}`",
+            await interaction.followup.send(
+                "Invalid Craig recording URL. Expected format: `https://craig.horse/rec/{id}?key={key}`",
                 ephemeral=True,
             )
             return
@@ -501,6 +511,15 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
         domain = match.group("domain")
         rec_id = match.group("rec_id")
         key = match.group("key")
+
+        # Only contact approved Craig hosts (defense against SSRF / look-alike domains).
+        if not is_allowed_craig_domain(domain):
+            await interaction.followup.send(
+                f"Unsupported recording host `{domain}`. Allowed hosts: craig.horse, craig.chat.",
+                ephemeral=True,
+            )
+            return
+
         rec_url = f"https://{domain}/rec/{rec_id}?key={key}"
 
         recording = DetectedRecording(
@@ -516,29 +535,41 @@ def register_commands(client: MinutesBot, tree: discord.app_commands.CommandTree
         guild_cfg = client.cfg.discord.get_guild(interaction.guild_id or 0)
         output_channel = client._get_output_channel_for_guild(guild_cfg)
         if output_channel is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Output channel not configured or not found for this guild.", ephemeral=True,
             )
             return
 
         if client.http_session is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Bot HTTP session not ready. Try again shortly.", ephemeral=True,
             )
             return
 
-        if client.state_store.is_known(rec_id):
-            await interaction.response.send_message(
-                f"Recording `{rec_id}` has already been processed.", ephemeral=True,
+        if client.state_store.is_claimed(rec_id):
+            await interaction.followup.send(
+                f"Recording `{rec_id}` is already being processed or has been completed.",
+                ephemeral=True,
             )
             return
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Processing recording `{rec_id}`... Results will be posted to <#{output_channel.id}>.",
             ephemeral=True,
         )
 
         client._launch_pipeline(recording, output_channel)
+
+    @minutes_process.error
+    async def minutes_process_error(
+        interaction: discord.Interaction, error: discord.app_commands.AppCommandError
+    ) -> None:
+        if isinstance(error, discord.app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                "録音の手動処理には「サーバー管理」権限が必要です。", ephemeral=True
+            )
+        else:
+            raise error
 
     @group.command(name="drive-status", description="Show Google Drive watcher status")
     async def minutes_drive_status(interaction: discord.Interaction) -> None:

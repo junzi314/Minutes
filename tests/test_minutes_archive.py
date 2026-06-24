@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,38 @@ def archive(tmp_path: Path) -> MinutesArchive:
     db = MinutesArchive(tmp_path / "test.db")
     yield db
     db.close()
+
+
+class TestCrossThreadAccess:
+    """The bot calls search()/count() via asyncio.to_thread (a worker thread),
+    while store() runs on the event-loop thread. The connection must tolerate
+    being used from a thread other than the one that created it."""
+
+    def test_search_works_from_worker_thread(self, archive: MinutesArchive) -> None:
+        archive.store(
+            guild_id=1,
+            date_str="2026-03-17 10:00",
+            speakers="Alice",
+            minutes_md="Discussed the quarterly budget allocation in detail.",
+        )
+
+        async def _run() -> list[SearchResult]:
+            return await asyncio.to_thread(archive.search, 1, "budget")
+
+        results = asyncio.run(_run())
+        assert len(results) == 1
+        assert results[0].speakers == "Alice"
+
+    def test_count_works_from_worker_thread(self, archive: MinutesArchive) -> None:
+        archive.store(
+            guild_id=1,
+            date_str="2026-03-17",
+            speakers="Bob",
+            minutes_md="Some archived meeting content for the count test.",
+        )
+
+        total = asyncio.run(asyncio.to_thread(archive.count, 1))
+        assert total == 1
 
 
 class TestStoreAndSearch:

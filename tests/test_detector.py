@@ -7,12 +7,33 @@ from src.detector import (
     RECORDING_URL_PATTERN,
     DetectedRecording,
     extract_recording_info,
+    is_allowed_craig_domain,
     is_craig_message,
     is_recording_ended,
     parse_recording_ended,
 )
 
 WATCH_CHANNEL = 1111111111111111111
+
+
+# --- domain allowlist (S2) ---
+
+
+def test_is_allowed_craig_domain_accepts_known() -> None:
+    assert is_allowed_craig_domain("craig.horse")
+    assert is_allowed_craig_domain("craig.chat")
+    assert is_allowed_craig_domain("CRAIG.HORSE")
+
+
+def test_is_allowed_craig_domain_rejects_unknown() -> None:
+    assert not is_allowed_craig_domain("craig.evil")
+    assert not is_allowed_craig_domain("evil.com")
+    assert not is_allowed_craig_domain("")
+
+
+def test_extract_recording_info_rejects_disallowed_domain() -> None:
+    payload = {"content": "https://craig.evil/rec/abc123?key=XYZ789"}
+    assert extract_recording_info(payload, 1, 1, 1) is None
 
 
 # --- is_craig_message ---

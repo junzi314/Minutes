@@ -143,13 +143,14 @@ class TestMarkProcessing:
 
         assert store.mark_processing("rec001", source="drive", source_id="f1", file_name="") is False
 
-    def test_after_failure_returns_false(self, tmp_path: Path) -> None:
-        """After mark_failed, mark_processing with same rec_id returns False."""
+    def test_after_failure_allows_retry(self, tmp_path: Path) -> None:
+        """After mark_failed, mark_processing re-claims the rec_id for a bounded
+        retry (a transient failure must not permanently block a recording)."""
         store = _make_store(tmp_path)
         store.mark_processing("rec001", source="craig", source_id="rec001", file_name="")
         store.mark_failed("rec001", "some error")
 
-        assert store.mark_processing("rec001", source="drive", source_id="f1", file_name="") is False
+        assert store.mark_processing("rec001", source="drive", source_id="f1", file_name="") is True
 
     def test_disk_failure_still_returns_true(self, tmp_path: Path) -> None:
         """When os.replace raises OSError, still returns True (in-memory dedup works)."""
@@ -160,6 +161,54 @@ class TestMarkProcessing:
 
         assert result is True
         assert store.is_known("rec001")
+
+
+# ===========================================================================
+# Bounded retry after failure (H1)
+# ===========================================================================
+
+
+class TestRetryAfterFailure:
+    """Failed recordings must be retryable up to a bounded number of attempts:
+    a transient failure (e.g. Claude billing) must not permanently block a
+    recording, while a permanently-bad file must not loop forever."""
+
+    def test_retry_allowed_after_single_failure(self, tmp_path: Path) -> None:
+        store = _make_store(tmp_path, max_attempts=3)
+        assert store.mark_processing("rec1", source="craig", source_id="rec1", file_name="") is True
+        store.mark_failed("rec1", "transient")
+        assert store.mark_processing("rec1", source="craig", source_id="rec1", file_name="") is True
+
+    def test_retry_bounded_by_max_attempts(self, tmp_path: Path) -> None:
+        store = _make_store(tmp_path, max_attempts=2)
+        assert store.mark_processing("rec1", source="craig", source_id="rec1", file_name="") is True
+        store.mark_failed("rec1", "boom")
+        assert store.mark_processing("rec1", source="craig", source_id="rec1", file_name="") is True
+        store.mark_failed("rec1", "boom")
+        assert store.mark_processing("rec1", source="craig", source_id="rec1", file_name="") is False
+
+    def test_is_claimed_false_while_retryable(self, tmp_path: Path) -> None:
+        store = _make_store(tmp_path, max_attempts=3)
+        store.mark_processing("rec1", source="craig", source_id="rec1", file_name="")
+        store.mark_failed("rec1", "boom")
+        assert store.is_claimed("rec1") is False
+
+    def test_is_claimed_true_when_exhausted(self, tmp_path: Path) -> None:
+        store = _make_store(tmp_path, max_attempts=1)
+        store.mark_processing("rec1", source="craig", source_id="rec1", file_name="")
+        store.mark_failed("rec1", "boom")
+        assert store.is_claimed("rec1") is True
+
+    def test_is_claimed_true_for_processing_and_success(self, tmp_path: Path) -> None:
+        store = _make_store(tmp_path)
+        store.mark_processing("p1", source="craig", source_id="p1", file_name="")
+        assert store.is_claimed("p1") is True
+        store.mark_success("p1")
+        assert store.is_claimed("p1") is True
+
+    def test_is_claimed_false_for_unknown(self, tmp_path: Path) -> None:
+        store = _make_store(tmp_path)
+        assert store.is_claimed("never-seen") is False
 
 
 # ===========================================================================

@@ -7,6 +7,7 @@ Tests verify the pipeline's stage orchestration, error handling, and cleanup.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,7 +39,12 @@ from src.errors import (
     PostingError,
     TranscriptionError,
 )
-from src.pipeline import _transcript_hash, run_pipeline, run_pipeline_from_tracks
+from src.pipeline import (
+    _stage_transcribe,
+    _transcript_hash,
+    run_pipeline,
+    run_pipeline_from_tracks,
+)
 from src.state_store import StateStore
 from src.transcriber import Segment
 
@@ -253,6 +259,135 @@ class TestPipelineHappyPath:
         send_calls = mock_channel.send.call_args_list
         all_args = " ".join(str(c) for c in send_calls)
         assert "ダウンロード" in all_args or "文字起こし" in all_args
+
+
+# ---------------------------------------------------------------------------
+# GPU transcription serialization (prevents VRAM OOM)
+# ---------------------------------------------------------------------------
+
+
+def _make_concurrency_probe(backend_name: str):
+    """Return (transcriber, state) where transcribe_all records peak concurrency."""
+    import threading
+    import time as _time
+
+    state = {"current": 0, "max": 0}
+    guard = threading.Lock()
+
+    class _Probe:
+        is_loaded = True
+
+        def __init__(self) -> None:
+            self.backend_name = backend_name
+
+        def transcribe_all(self, tracks: object) -> list[Segment]:
+            with guard:
+                state["current"] += 1
+                state["max"] = max(state["max"], state["current"])
+            _time.sleep(0.05)
+            with guard:
+                state["current"] -= 1
+            return [Segment(start=0.0, end=1.0, text="x", speaker="a")]
+
+    return _Probe(), state
+
+
+class TestTranscriptionSerialization:
+    """Concurrent local-backend transcriptions would OOM the shared CUDA model,
+    so they must run one at a time. The API backend has no GPU constraint."""
+
+    def test_local_backend_runs_one_at_a_time(self) -> None:
+        transcriber, state = _make_concurrency_probe("local")
+
+        async def _run() -> None:
+            await asyncio.gather(
+                _stage_transcribe(transcriber, []),
+                _stage_transcribe(transcriber, []),
+                _stage_transcribe(transcriber, []),
+            )
+
+        asyncio.run(_run())
+        assert state["max"] == 1
+
+    def test_api_backend_runs_in_parallel(self) -> None:
+        transcriber, state = _make_concurrency_probe("api")
+
+        async def _run() -> None:
+            await asyncio.gather(
+                _stage_transcribe(transcriber, []),
+                _stage_transcribe(transcriber, []),
+            )
+
+        asyncio.run(_run())
+        assert state["max"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# Transcript persistence / recovery (#2)
+# ---------------------------------------------------------------------------
+
+
+class TestTranscriptPersistence:
+    """The merged transcript must be persisted to disk before generation, so a
+    stage-5 (generation) failure does not lose the expensive transcription. The
+    recovery artifact is removed once minutes are produced."""
+
+    @pytest.mark.asyncio
+    async def test_transcript_persisted_on_generation_failure(
+        self,
+        mock_channel: MagicMock,
+        state_store: StateStore,
+        mock_transcriber: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        cfg = _make_config(pipeline=PipelineConfig(state_dir=str(tmp_path / "state")))
+        generator = MagicMock()
+        generator.is_loaded = True
+        generator.generate = AsyncMock(side_effect=GenerationError("out of credits"))
+        tracks = _make_tracks(tmp_path)
+
+        with pytest.raises(GenerationError):
+            await run_pipeline_from_tracks(
+                tracks=tracks,
+                cfg=cfg,
+                transcriber=mock_transcriber,
+                generator=generator,
+                output_channel=mock_channel,
+                state_store=state_store,
+                source_label="craig:rec999",
+            )
+
+        rec_files = list((tmp_path / "state" / "recovery").glob("*.json"))
+        assert len(rec_files) == 1
+        payload = json.loads(rec_files[0].read_text(encoding="utf-8"))
+        assert payload["transcript"]
+        assert payload["source_label"] == "craig:rec999"
+
+    @pytest.mark.asyncio
+    async def test_recovery_removed_on_success(
+        self,
+        mock_channel: MagicMock,
+        state_store: StateStore,
+        mock_transcriber: MagicMock,
+        mock_generator: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        cfg = _make_config(pipeline=PipelineConfig(state_dir=str(tmp_path / "state")))
+        tracks = _make_tracks(tmp_path)
+
+        await run_pipeline_from_tracks(
+            tracks=tracks,
+            cfg=cfg,
+            transcriber=mock_transcriber,
+            generator=mock_generator,
+            output_channel=mock_channel,
+            state_store=state_store,
+            source_label="craig:recOK",
+        )
+
+        rec_dir = tmp_path / "state" / "recovery"
+        rec_files = list(rec_dir.glob("*.json")) if rec_dir.exists() else []
+        assert rec_files == []
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,16 @@ RECORDING_URL_PATTERN = re.compile(
     r"https?://(?P<domain>craig\.\w+)/rec/(?P<rec_id>[a-zA-Z0-9]+)\?key=(?P<key>[a-zA-Z0-9]+)"
 )
 
+# The URL regex matches any ``craig.<word>`` host, so the parsed domain must be
+# validated against this allowlist before the bot issues any request to it
+# (defense against SSRF / look-alike domains via a user-supplied URL).
+ALLOWED_CRAIG_DOMAINS = frozenset({"craig.horse", "craig.chat"})
+
+
+def is_allowed_craig_domain(domain: str) -> bool:
+    """Return True if ``domain`` is an approved Craig host."""
+    return domain.lower() in ALLOWED_CRAIG_DOMAINS
+
 
 @dataclass(frozen=True)
 class DetectedRecording:
@@ -80,6 +90,9 @@ def extract_recording_info(
         return None
 
     domain = match.group("domain")
+    if not is_allowed_craig_domain(domain):
+        logger.warning("Ignoring recording URL with disallowed domain: %s", domain)
+        return None
     rec_id = match.group("rec_id")
     key = match.group("key")
     rec_url = f"https://{domain}/rec/{rec_id}?key={key}"

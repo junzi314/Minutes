@@ -12,8 +12,12 @@ Two entry points:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import json
 import logging
+import os
+import re
 import tempfile
 import time
 from datetime import datetime
@@ -41,6 +45,59 @@ def _transcript_hash(transcript: str, template_name: str = "minutes") -> str:
     """Compute a deterministic cache key from the transcript text and template."""
     key = f"{template_name}:{transcript}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+# Serializes GPU transcription so concurrent recordings (Drive multi-folder
+# routing, Craig detection + /minutes process) cannot run two transcriptions at
+# once and OOM the shared CUDA model. Created lazily on the running loop and
+# recreated if the loop changes (e.g. across tests); in production there is a
+# single long-lived event loop, so all pipeline runs share one semaphore.
+_transcribe_semaphore: asyncio.Semaphore | None = None
+_transcribe_semaphore_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_transcribe_semaphore() -> asyncio.Semaphore:
+    """Return the process-wide transcription semaphore bound to the running loop."""
+    global _transcribe_semaphore, _transcribe_semaphore_loop
+    loop = asyncio.get_running_loop()
+    if _transcribe_semaphore is None or _transcribe_semaphore_loop is not loop:
+        _transcribe_semaphore = asyncio.Semaphore(1)
+        _transcribe_semaphore_loop = loop
+    return _transcribe_semaphore
+
+
+def _recovery_path(state_dir: str, source_label: str) -> Path:
+    """Path to the on-disk recovery artifact for a given source."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", source_label) or "unknown"
+    return Path(state_dir) / "recovery" / f"{safe}.json"
+
+
+def _save_recovery(path: Path, payload: dict) -> None:
+    """Persist the merged transcript before generation so a stage-5 (generation)
+    failure leaves the expensive transcription recoverable on disk.
+
+    Best-effort: any failure here is logged but never propagated, so a recovery
+    write problem cannot abort minutes generation. ``default=str`` guards against
+    an unexpected non-serializable value in the payload.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        os.replace(str(tmp), str(path))
+    except Exception:
+        logger.warning("Failed to persist recovery transcript to %s", path, exc_info=True)
+
+
+def _delete_recovery(path: Path) -> None:
+    """Remove the recovery artifact once minutes have been produced."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 async def run_pipeline_from_tracks(
@@ -91,6 +148,7 @@ async def run_pipeline_from_tracks(
     )
 
     timeout_sec = cfg.pipeline.processing_timeout_sec
+    recovery_path = _recovery_path(cfg.pipeline.state_dir, source_label)
 
     try:
         async with asyncio.timeout(timeout_sec):
@@ -169,6 +227,24 @@ async def run_pipeline_from_tracks(
                 transcript_md = format_transcript_markdown(
                     transcript, date_str, speakers_str,
                 )
+            # Persist transcript before generation so a generation failure
+            # (e.g. Claude API outage / out of credits) does not discard the
+            # expensive transcription. Removed once minutes are produced.
+            _save_recovery(
+                recovery_path,
+                {
+                    "source_label": source_label,
+                    "guild_id": resolved_guild_id,
+                    "guild_name": resolved_guild_name,
+                    "channel_name": channel_name,
+                    "date": date_str,
+                    "speakers": speakers_str,
+                    "template_name": template_name,
+                    "transcript": transcript,
+                    "transcript_md": transcript_md or "",
+                },
+            )
+
             th = _transcript_hash(transcript, template_name)
             minutes_md = state_store.get_cached_minutes(th)
 
@@ -255,6 +331,9 @@ async def run_pipeline_from_tracks(
                 except Exception:
                     logger.warning("Archive write failed (non-critical)", exc_info=True)
 
+            # Success: minutes produced; the recovery transcript is no longer needed.
+            _delete_recovery(recovery_path)
+
         # Clean up status message
         if status_msg:
             try:
@@ -296,6 +375,8 @@ async def run_pipeline_from_tracks(
             elapsed,
             exc,
         )
+        if recovery_path.exists():
+            logger.warning("Transcript preserved for recovery at %s", recovery_path)
         if status_msg:
             try:
                 await status_msg.delete()
@@ -317,6 +398,8 @@ async def run_pipeline_from_tracks(
             source_label,
             elapsed,
         )
+        if recovery_path.exists():
+            logger.warning("Transcript preserved for recovery at %s", recovery_path)
         if status_msg:
             try:
                 await status_msg.delete()
@@ -453,7 +536,15 @@ async def _stage_transcribe(
     if not transcriber.is_loaded:
         raise TranscriptionError("Whisper model not loaded")
 
-    segments = await asyncio.to_thread(transcriber.transcribe_all, tracks)
+    # Serialize GPU work: concurrent local-backend transcriptions would exhaust
+    # VRAM on the shared CUDA model. The API backend has no GPU constraint.
+    gate = (
+        contextlib.nullcontext()
+        if getattr(transcriber, "backend_name", "local") == "api"
+        else _get_transcribe_semaphore()
+    )
+    async with gate:
+        segments = await asyncio.to_thread(transcriber.transcribe_all, tracks)
 
     elapsed = time.monotonic() - t0
     logger.info(
